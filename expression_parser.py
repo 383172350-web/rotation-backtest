@@ -9,7 +9,7 @@ import re
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional
-from . import indicators
+import indicators
 
 
 class ExpressionParser:

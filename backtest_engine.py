@@ -6,8 +6,8 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-from .indicators import compute_all_indicators
-from .expression_parser import evaluate_condition, evaluate_score
+from indicators import compute_all_indicators
+from expression_parser import evaluate_condition, evaluate_score
 
 
 class Position:

@@ -20,9 +20,9 @@ def get_portfolio_status(config: dict, trade_log_path: str = 'output/trade_log.c
         dict: 包含 current_positions, history_positions, rebalance_plan
     """
     import yaml
-    from .data_fetcher import fetch_kline
-    from .indicators import compute_all_indicators
-    from .expression_parser import ExpressionParser, evaluate_condition
+    from data_fetcher import fetch_kline
+    from indicators import compute_all_indicators
+    from expression_parser import ExpressionParser, evaluate_condition
 
     strategy = config['strategy']
     universe = strategy['universe']
