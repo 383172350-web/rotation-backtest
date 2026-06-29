@@ -25,7 +25,26 @@ def get_data_dir() -> str:
         return _LOCAL_DATA_DIR
     # 默认项目内目录
     default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ETF", "1d")
+    # 如果目录不存在，尝试从zip解压
+    if not os.path.exists(default):
+        _extract_zip_data()
     return default
+
+
+def _extract_zip_data():
+    """从仓库中的zip文件解压数据到 data/ETF/1d"""
+    zip_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_etf_1d.zip")
+    if not os.path.exists(zip_path):
+        return
+    try:
+        import zipfile
+        extract_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(extract_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            z.extractall(extract_dir)
+        print(f"  📦 已解压数据到 {extract_dir}")
+    except Exception as e:
+        print(f"  解压数据失败: {e}")
 
 
 def fetch_kline(code: str, start_date: str, end_date: str,
