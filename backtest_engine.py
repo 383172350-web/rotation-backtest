@@ -103,8 +103,7 @@ class BacktestEngine:
             df = compute_all_indicators(df)
             self.all_data[code] = df
             # 只保留股票池标的（排除替代资产、基准等）的交易日交集
-            alt_code = (self.alternative_asset or {}).get('code', '__alt__')
-            if not code.startswith('__') and code != alt_code:
+            if not code.startswith('__') and code != self.alternative_asset.get('code', '__alt__'):
                 if all_dates_set is None:
                     all_dates_set = set(df.index.tolist())
                 else:
@@ -156,14 +155,8 @@ class BacktestEngine:
                 'total_value': total_value,
                 'cash': self.cash,
                 'positions_value': total_value - self.cash,
-                'hold_count': len(self.positions)
+                'num_positions': len(self.positions)
             })
-
-        # 记录最后一天的调仓信号（用于生成调仓计划）
-        self._last_day_signals = {
-            'sells': [{'code': o['code'], 'name': o.get('name', o['code']), 'reason': o['reason']} for o in self.pending_sells],
-            'buys': [{'code': o['code'], 'name': o['name'], 'score': o['score']} for o in self.pending_buys],
-        }
 
         return self._generate_results()
 
@@ -264,24 +257,10 @@ class BacktestEngine:
                 except Exception:
                     sell_results.append(False)
 
-            should_sell = all(sell_results) if sell_mode == 'all' else any(sell_results) if sell_mode == 'any' else self._evaluate_custom_expr(sell_results, self.strategy.get('sell_custom_expr', ''))
+            should_sell = all(sell_results) if sell_mode == 'all' else any(sell_results)
 
             if should_sell:
                 self.pending_sells.append({'code': code, 'reason': sell_reason})
-
-    def _evaluate_custom_expr(self, results, expression):
-        """解析并评估自定义规则匹配表达式"""
-        if not expression or not expression.strip():
-            return all(results) if results else True
-        expr = expression.lower().strip()
-        # 将数字替换为结果
-        for i in range(len(results)):
-            expr = expr.replace(str(i + 1), str(results[i]))
-        expr = expr.replace('and', ' and ').replace('or', ' or ')
-        try:
-            return eval(expr)
-        except Exception:
-            return False
 
     def _rebalance_buy(self, date, date_str: str, universe: dict):
         """
@@ -325,7 +304,7 @@ class BacktestEngine:
             current_rank = rank_map_for_buy.get(code, 999)
 
             buy_rules = self.strategy.get('buy_rules', [])
-            # match_mode: all=全部满足(AND), any=满足任一(OR), custom=自定义表达式, 默认all
+            # match_mode: all=全部满足(AND), any=满足任一(OR), 默认all(买入倾向严格)
             buy_mode = self.strategy.get('buy_match_mode', 'all')
             buy_results = []
 
@@ -341,14 +320,7 @@ class BacktestEngine:
                 except Exception:
                     buy_results.append(False)
 
-            if buy_mode == 'all':
-                all_conditions_met = all(buy_results)
-            elif buy_mode == 'any':
-                all_conditions_met = any(buy_results)
-            elif buy_mode == 'custom':
-                all_conditions_met = self._evaluate_custom_expr(buy_results, self.strategy.get('buy_custom_expr', ''))
-            else:
-                all_conditions_met = all(buy_results)
+            all_conditions_met = all(buy_results) if buy_mode == 'all' else any(buy_results)
 
             if all_conditions_met:
                 self.pending_buys.append({'code': code, 'name': universe.get(code, code), 'score': score})
@@ -436,7 +408,7 @@ class BacktestEngine:
             'reason': f'排名得分: {score:.2f}'
         })
 
-        print(f"  📈 {date_str} 买入 {name}({code}) {shares}股 @ {price:.4f}, 金额={cost:.0f}")
+        print(f"  [BUY] {date_str} 买入 {name}({code}) {shares}股 @ {price:.4f}, 金额={cost:.0f}")
 
     def _execute_sell(self, code: str, date_str: str, reason: str, date):
         """T+1执行卖出：使用T+1日的open价格。"""
@@ -468,7 +440,7 @@ class BacktestEngine:
             'reason': reason
         })
 
-        print(f"  📉 {date_str} 卖出 {pos.name}({code}) {pos.shares}股 @ {price:.4f}, "
+        print(f"  [SELL] {date_str} 卖出 {pos.name}({code}) {pos.shares}股 @ {price:.4f}, "
               f"收益={profit_pct:.2%}({profit_amount:.0f}), 原因: {reason}")
 
         del self.positions[code]
@@ -515,102 +487,19 @@ class BacktestEngine:
         else:
             win_rate = 0
 
-        # ========== 1. 当前持仓详情 ==========
-        current_holdings = []
-        total_value = df['total_value'].iloc[-1]
-        for code, pos in self.positions.items():
-            ratio = pos.market_value / total_value if total_value > 0 else 0
-            current_holdings.append({
-                'code': code,
-                'name': pos.name,
-                'shares': round(pos.shares, 2),
-                'cost_price': round(pos.cost_price, 4),
-                'current_price': round(pos.current_price, 4),
-                'market_value': round(pos.market_value, 2),
-                'ratio': round(ratio, 4),
-                'profit_pct': round(pos.profit_pct, 4),
-                'hold_days': pos.hold_days,
-                'entry_date': pos.entry_date,
-            })
-        # 添加替代资产（现金等效）持仓
-        if self.alternative_asset and self.cash > 0:
-            alt_code = self.alternative_asset['code']
-            alt_name = self.alternative_asset.get('name', '替代资产')
-            alt_ratio = self.cash / total_value if total_value > 0 else 0
-            current_holdings.append({
-                'code': alt_code,
-                'name': alt_name,
-                'shares': round(self.cash, 2),
-                'cost_price': 1.0,
-                'current_price': 1.0,
-                'market_value': round(self.cash, 2),
-                'ratio': round(alt_ratio, 4),
-                'profit_pct': 0.0,
-                'hold_days': 0,
-                'entry_date': '-',
-            })
-        current_holdings_df = pd.DataFrame(current_holdings).sort_values('market_value', ascending=False) if current_holdings else pd.DataFrame()
-
-        # ========== 2. 历史持仓（已卖出）汇总 ==========
-        historical_holdings = []
-        if not trade_df.empty:
-            sell_df = trade_df[trade_df['action'] == 'SELL'].copy()
-            if not sell_df.empty and 'profit_amount' in sell_df.columns:
-                sell_df['profit_amount_num'] = pd.to_numeric(sell_df['profit_amount'], errors='coerce')
-                for code in sell_df['code'].unique():
-                    code_sells = sell_df[sell_df['code'] == code]
-                    total_profit = code_sells['profit_amount_num'].sum()
-                    trade_count = len(code_sells)
-                    win_count = len(code_sells[code_sells['profit_amount_num'] > 0])
-                    name = code_sells['name'].iloc[0] if 'name' in code_sells.columns else code
-                    historical_holdings.append({
-                        'code': code,
-                        'name': name,
-                        'trade_count': trade_count,
-                        'win_count': win_count,
-                        'total_profit': round(total_profit, 2),
-                        'avg_profit': round(total_profit / trade_count, 2) if trade_count > 0 else 0,
-                    })
-        historical_holdings_df = pd.DataFrame(historical_holdings).sort_values('total_profit', ascending=False) if historical_holdings else pd.DataFrame()
-
-        # ========== 3. 调仓计划（下一个交易日）==========
-        rebalance_plan = []
-        last_date = self.all_dates[-1] if self.all_dates else None
-        if last_date and hasattr(self, '_last_day_signals'):
-            signals = self._last_day_signals
-            for item in signals.get('sells', []):
-                rebalance_plan.append({
-                    'action': '卖出',
-                    'code': item['code'],
-                    'name': item.get('name', item['code']),
-                    'reason': item.get('reason', ''),
-                })
-            for item in signals.get('buys', []):
-                rebalance_plan.append({
-                    'action': '买入',
-                    'code': item['code'],
-                    'name': item.get('name', item['code']),
-                    'reason': f"排名得分: {item.get('score', 0):.2f}",
-                })
-        rebalance_plan_df = pd.DataFrame(rebalance_plan) if rebalance_plan else pd.DataFrame()
-
         results = {
             'strategy_name': self.strategy['name'],
             'period': f"{self.start_date} ~ {self.end_date}",
             'initial_capital': self.initial_capital,
             'final_value': round(df['total_value'].iloc[-1], 2),
-            'total_return': float(total_return),
-            'annual_return': float(annual_return),
-            'max_drawdown': float(max_drawdown),
+            'total_return': f"{total_return:.2%}",
+            'annual_return': f"{annual_return:.2%}",
+            'max_drawdown': f"{max_drawdown:.2%}",
             'sharpe_ratio': round(sharpe, 2),
             'total_trades': len(self.trade_log),
-            'win_rate': float(win_rate),
+            'win_rate': f"{win_rate:.2%}",
             'daily_values': df,
-            'trade_log': trade_df,
-            'positions': self.positions,
-            'current_holdings': current_holdings_df,
-            'historical_holdings': historical_holdings_df,
-            'rebalance_plan': rebalance_plan_df,
+            'trade_log': trade_df
         }
 
         print(f"\n{'='*60}")

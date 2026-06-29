@@ -72,13 +72,10 @@ def KDJ(high: pd.Series, low: pd.Series, close: pd.Series,
 
 
 def ATR(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """平均真实波幅（Wilder平滑/EMA方式，与主流行情软件一致）"""
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    # Wilder平滑: alpha = 1/period
-    return tr.ewm(alpha=1.0/period, adjust=False).mean()
+    """平均真实波幅（标准ATR - 简单移动平均MA，对齐通达信公式 ATR:=MA(TR,26)）"""
+    prev = close.shift(1)
+    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
 
 
 def returns(close: pd.Series, period: int) -> pd.Series:
