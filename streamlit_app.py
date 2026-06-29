@@ -17,7 +17,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import BacktestEngine
-from data_fetcher import fetch_kline
+from data_fetcher import fetch_kline, set_data_dir, get_data_dir
 
 st.set_page_config(layout="wide", page_title="轮动策略回测系统", page_icon="📊", initial_sidebar_state="expanded")
 
@@ -445,6 +445,24 @@ def main():
     # ---------- 侧边栏 ----------
     with st.sidebar:
         st.header("⚙️ 策略配置")
+
+        # ---------- 数据源配置 ----------
+        with st.expander("📁 数据源配置", expanded=False):
+            local_path = st.text_input(
+                "本地数据路径（可选）",
+                value="D:\\qmt_data\\ETF\\1d",
+                help="填写本地pkl数据目录，如 D:\\qmt_data\\ETF\\1d。云端运行时请留空，自动使用yfinance。"
+            )
+            save_download = st.checkbox("保存下载数据到本地", value=True,
+                help="从yfinance下载的数据是否保存到项目内 data/ETF/1d 目录，实现增量更新")
+            
+            if local_path and os.path.exists(local_path):
+                set_data_dir(local_path)
+                st.success(f"✅ 已加载本地数据: {local_path}")
+            else:
+                st.info("💡 未配置本地路径，将使用项目内数据或yfinance")
+        
+        st.divider()
 
         preset = st.selectbox("选择预设策略", list(PRESETS.keys()), key="preset_select")
         preset_data = PRESETS[preset] if preset != "🎯 自定义策略" else {}

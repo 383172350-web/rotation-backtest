@@ -8,8 +8,24 @@ from typing import Optional
 from datetime import datetime, timedelta
 import os
 
-# 本地数据目录
-LOCAL_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ETF", "1d")
+# 本地数据目录（可通过 set_data_dir 修改）
+_LOCAL_DATA_DIR = None
+
+
+def set_data_dir(path: str):
+    """设置本地数据目录，例如 D:\\qmt_data\\ETF\\1d"""
+    global _LOCAL_DATA_DIR
+    _LOCAL_DATA_DIR = path
+    print(f"  📁 数据目录设置为: {path}")
+
+
+def get_data_dir() -> str:
+    """获取当前数据目录"""
+    if _LOCAL_DATA_DIR and os.path.exists(_LOCAL_DATA_DIR):
+        return _LOCAL_DATA_DIR
+    # 默认项目内目录
+    default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ETF", "1d")
+    return default
 
 
 def fetch_kline(code: str, start_date: str, end_date: str,
@@ -86,7 +102,7 @@ def _load_local_pkl(code: str, start_date: str, end_date: str) -> Optional[pd.Da
         return None
     
     pkl_name = f"{pure_code}_{suffix}_1d.pkl"
-    pkl_path = os.path.join(LOCAL_DATA_DIR, pkl_name)
+    pkl_path = os.path.join(get_data_dir(), pkl_name)
     
     if not os.path.exists(pkl_path):
         return None
