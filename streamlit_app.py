@@ -205,9 +205,11 @@ def build_config(form_data):
         "rank_formula": form_data["rank_formula"],
         "rank_direction": form_data["rank_direction"],
         "position": {"max_count": form_data["max_count"], "mode": form_data["position_mode"]},
-        "buy_match_mode": "all" if form_data.get("buy_all", True) else "any",
+        "buy_match_mode": form_data.get("buy_match_mode", "all"),
+        "buy_custom_expr": form_data.get("buy_custom_expr", ""),
         "buy_rules": [],
-        "sell_match_mode": "any" if form_data.get("sell_any", True) else "all",
+        "sell_match_mode": form_data.get("sell_match_mode", "any"),
+        "sell_custom_expr": form_data.get("sell_custom_expr", ""),
         "sell_rules": [],
         "rebalance": {"frequency": form_data["rebalance_freq"], "interval": form_data.get("rebalance_interval", 2)},
         "backtest": {
@@ -259,11 +261,11 @@ def rule_builder(key_prefix, existing_rules, title, color="green"):
     st.markdown(f"**{title}**")
     rules = list(existing_rules)
 
-    # 显示已有规则
+    # 显示已有规则（带编号）
     for i, rule in enumerate(rules):
         c1, c2 = st.columns([8, 1])
         with c1:
-            st.markdown(f'<div class="rule-box" style="border-left-color: {"#4CAF50" if color=="green" else "#F44336"};">{rule}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="rule-box" style="border-left-color: {"#4CAF50" if color=="green" else "#F44336"};"><b>{i+1}.</b> {rule}</div>', unsafe_allow_html=True)
         with c2:
             if st.button("🗑️", key=f"{key_prefix}_del_{i}"):
                 rules.pop(i)
@@ -481,12 +483,32 @@ def main():
 
         st.divider()
         st.subheader("🟢 买入规则")
-        buy_all = st.radio("模式", ["all", "any"], index=0, format_func=lambda x: "全部满足才买" if x == "all" else "满足一条就买", key="buy_mode")
+        buy_mode = st.radio("匹配模式", ["按数量匹配", "自定义匹配"], index=0, horizontal=True, key="buy_mode")
+        
+        if buy_mode == "按数量匹配":
+            buy_sub = st.radio("", ["全部匹配", "匹配任意1条"], index=0, horizontal=True, key="buy_match_sub", label_visibility="collapsed")
+            buy_match_mode = "all" if buy_sub == "全部匹配" else "any"
+            buy_custom_expr = ""
+        else:
+            buy_match_mode = "custom"
+            st.caption("自定义匹配：添加规则后，输入规则匹配表达式")
+            buy_custom_expr = st.text_input("规则匹配表达式", value="(1and2)or3", key="buy_custom_expr", help="如：(1and2)or3 表示同时匹配规则1和2，或仅匹配规则3")
+        
         buy_rules = rule_builder("buy", preset_data.get("buy_rules", []), "🟢 买入规则", "green")
 
         st.divider()
         st.subheader("🔴 卖出规则")
-        sell_any = st.radio("模式", ["any", "all"], index=0, format_func=lambda x: "满足一条就卖" if x == "any" else "全部满足才卖", key="sell_mode")
+        sell_mode = st.radio("匹配模式", ["按数量匹配", "自定义匹配"], index=0, horizontal=True, key="sell_mode")
+        
+        if sell_mode == "按数量匹配":
+            sell_sub = st.radio("", ["全部匹配", "匹配任意1条"], index=0, horizontal=True, key="sell_match_sub", label_visibility="collapsed")
+            sell_match_mode = "all" if sell_sub == "全部匹配" else "any"
+            sell_custom_expr = ""
+        else:
+            sell_match_mode = "custom"
+            st.caption("自定义匹配：添加规则后，输入规则匹配表达式")
+            sell_custom_expr = st.text_input("规则匹配表达式", value="(1or2)or3", key="sell_custom_expr", help="如：(1or2)or3 表示匹配任意一条规则")
+        
         sell_rules = rule_builder("sell", preset_data.get("sell_rules", []), "🔴 卖出规则", "red")
 
         st.divider()
@@ -555,8 +577,10 @@ def main():
                 "strategy_name": strategy_name, "universe": universe,
                 "rank_formula": rank_formula, "rank_direction": rank_direction,
                 "max_count": max_count, "position_mode": position_mode,
-                "buy_all": buy_all == "all", "buy_rules": buy_rules,
-                "sell_any": sell_any == "any", "sell_rules": sell_rules,
+                "buy_match_mode": buy_match_mode, "buy_rules": buy_rules,
+                "buy_custom_expr": buy_custom_expr,
+                "sell_match_mode": sell_match_mode, "sell_rules": sell_rules,
+                "sell_custom_expr": sell_custom_expr,
                 "rebalance_freq": rebalance_freq, "rebalance_interval": rebalance_interval,
                 "start_date": start_date.strftime("%Y-%m-%d"),
                 "end_date": end_date.strftime("%Y-%m-%d"),

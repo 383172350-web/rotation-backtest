@@ -264,10 +264,24 @@ class BacktestEngine:
                 except Exception:
                     sell_results.append(False)
 
-            should_sell = all(sell_results) if sell_mode == 'all' else any(sell_results)
+            should_sell = all(sell_results) if sell_mode == 'all' else any(sell_results) if sell_mode == 'any' else self._evaluate_custom_expr(sell_results, self.strategy.get('sell_custom_expr', ''))
 
             if should_sell:
                 self.pending_sells.append({'code': code, 'reason': sell_reason})
+
+    def _evaluate_custom_expr(self, results, expression):
+        """解析并评估自定义规则匹配表达式"""
+        if not expression or not expression.strip():
+            return all(results) if results else True
+        expr = expression.lower().strip()
+        # 将数字替换为结果
+        for i in range(len(results)):
+            expr = expr.replace(str(i + 1), str(results[i]))
+        expr = expr.replace('and', ' and ').replace('or', ' or ')
+        try:
+            return eval(expr)
+        except Exception:
+            return False
 
     def _rebalance_buy(self, date, date_str: str, universe: dict):
         """
@@ -311,7 +325,7 @@ class BacktestEngine:
             current_rank = rank_map_for_buy.get(code, 999)
 
             buy_rules = self.strategy.get('buy_rules', [])
-            # match_mode: all=全部满足(AND), any=满足任一(OR), 默认all(买入倾向严格)
+            # match_mode: all=全部满足(AND), any=满足任一(OR), custom=自定义表达式, 默认all
             buy_mode = self.strategy.get('buy_match_mode', 'all')
             buy_results = []
 
@@ -327,7 +341,14 @@ class BacktestEngine:
                 except Exception:
                     buy_results.append(False)
 
-            all_conditions_met = all(buy_results) if buy_mode == 'all' else any(buy_results)
+            if buy_mode == 'all':
+                all_conditions_met = all(buy_results)
+            elif buy_mode == 'any':
+                all_conditions_met = any(buy_results)
+            elif buy_mode == 'custom':
+                all_conditions_met = self._evaluate_custom_expr(buy_results, self.strategy.get('buy_custom_expr', ''))
+            else:
+                all_conditions_met = all(buy_results)
 
             if all_conditions_met:
                 self.pending_buys.append({'code': code, 'name': universe.get(code, code), 'score': score})
