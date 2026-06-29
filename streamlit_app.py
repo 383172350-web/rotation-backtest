@@ -17,7 +17,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import BacktestEngine
-from data_fetcher import fetch_kline, set_data_dir, get_data_dir
+from data_fetcher import fetch_kline
 
 st.set_page_config(layout="wide", page_title="轮动策略回测系统", page_icon="📊", initial_sidebar_state="expanded")
 
@@ -446,24 +446,6 @@ def main():
     with st.sidebar:
         st.header("⚙️ 策略配置")
 
-        # ---------- 数据源配置 ----------
-        with st.expander("📁 数据源配置", expanded=False):
-            local_path = st.text_input(
-                "本地数据路径（可选）",
-                value="D:\\qmt_data\\ETF\\1d",
-                help="填写本地pkl数据目录，如 D:\\qmt_data\\ETF\\1d。云端运行时请留空，自动使用yfinance。"
-            )
-            save_download = st.checkbox("保存下载数据到本地", value=True,
-                help="从yfinance下载的数据是否保存到项目内 data/ETF/1d 目录，实现增量更新")
-            
-            if local_path and os.path.exists(local_path):
-                set_data_dir(local_path)
-                st.success(f"✅ 已加载本地数据: {local_path}")
-            else:
-                st.info("💡 未配置本地路径，将使用项目内数据或yfinance")
-        
-        st.divider()
-
         preset = st.selectbox("选择预设策略", list(PRESETS.keys()), key="preset_select")
         preset_data = PRESETS[preset] if preset != "🎯 自定义策略" else {}
 
@@ -519,10 +501,12 @@ def main():
         benchmark = st.text_input("基准", value=preset_data.get("benchmark", "sh510300"), key="bench")
         alternative_asset = st.text_input("替代资产（闲置资金配置）", value=preset_data.get("alternative_asset", ""), key="alt_asset", help="例如：sh511880（银华日利）")
 
-        st.divider()
+    # ---------- 主页面 ----------
+    # 顶部回测按钮区域
+    col_btn1, col_btn2 = st.columns([6, 1])
+    with col_btn2:
         run_btn = st.button("🚀 运行回测", type="primary", use_container_width=True)
 
-    # ---------- 主页面 ----------
     if run_btn:
         if not universe:
             st.error("请先选择标的池！")
@@ -602,6 +586,45 @@ def show_results(results):
         with cols[i]:
             st.markdown(f'<div style="background:{color};padding:1rem;border-radius:8px;text-align:center;color:white;"><div style="font-size:1.6rem;font-weight:bold;">{value}</div><div style="font-size:0.8rem;">{label}</div></div>', unsafe_allow_html=True)
 
+    # ========== 持仓与调仓 ==========
+    st.divider()
+    st.subheader("💼 持仓与调仓")
+    
+    tab1, tab2, tab3 = st.tabs(["📋 当前持仓", "📜 历史持仓", "📋 调仓计划"])
+    
+    with tab1:
+        if 'current_holdings' in results and not results['current_holdings'].empty:
+            df = results['current_holdings'].copy()
+            df['持仓比例'] = (df['ratio'] * 100).round(2).astype(str) + '%'
+            df['盈亏比例'] = (df['profit_pct'] * 100).round(2).astype(str) + '%'
+            df['市值'] = df['market_value'].round(2)
+            display_df = df[['code', 'name', 'shares', 'cost_price', 'current_price', '市值', '持仓比例', '盈亏比例', 'hold_days', 'entry_date']]
+            display_df.columns = ['代码', '名称', '数量', '成本价', '现价', '市值', '持仓比例', '盈亏比例', '持仓天数', '买入日期']
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("当前无持仓")
+    
+    with tab2:
+        if 'historical_holdings' in results and not results['historical_holdings'].empty:
+            df = results['historical_holdings'].copy()
+            df['胜率'] = (df['win_count'] / df['trade_count'] * 100).round(1).astype(str) + '%'
+            df['累计盈亏'] = df['total_profit'].round(2)
+            df['平均盈亏'] = df['avg_profit'].round(2)
+            display_df = df[['code', 'name', 'trade_count', 'win_count', '胜率', '累计盈亏', '平均盈亏']]
+            display_df.columns = ['代码', '名称', '交易次数', '盈利次数', '胜率', '累计盈亏', '平均盈亏']
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无历史交易记录")
+    
+    with tab3:
+        if 'rebalance_plan' in results and not results['rebalance_plan'].empty:
+            df = results['rebalance_plan'].copy()
+            display_df = df[['action', 'code', 'name', 'reason']]
+            display_df.columns = ['操作', '代码', '名称', '原因']
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无调仓计划（回测最后一天无待执行订单）")
+
     st.divider()
     st.subheader("📉 净值曲线")
     if 'daily_values' in results and not results['daily_values'].empty:
@@ -623,24 +646,6 @@ def show_results(results):
         st.dataframe(trades, use_container_width=True)
         csv = trades.to_csv(index=False).encode('utf-8')
         st.download_button("下载交易日志", csv, "trades.csv", "text/csv")
-
-    st.divider()
-    st.subheader("💼 当前持仓")
-    if 'positions' in results and results['positions']:
-        pos = []
-        for code, p in results['positions'].items():
-            pos.append({
-                '代码': code,
-                '名称': getattr(p, 'name', code),
-                '数量': getattr(p, 'shares', 0),
-                '成本': f"{getattr(p, 'cost_price', 0):.3f}",
-                '现价': f"{getattr(p, 'current_price', 0):.3f}",
-                '市值': f"{getattr(p, 'market_value', 0):.2f}",
-                '收益率': f"{getattr(p, 'profit_pct', 0) * 100:.2f}%"
-            })
-        st.dataframe(pd.DataFrame(pos), use_container_width=True)
-    else:
-        st.info("当前无持仓")
 
 
 def show_guide():

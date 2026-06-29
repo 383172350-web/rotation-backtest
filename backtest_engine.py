@@ -159,6 +159,12 @@ class BacktestEngine:
                 'hold_count': len(self.positions)
             })
 
+        # 记录最后一天的调仓信号（用于生成调仓计划）
+        self._last_day_signals = {
+            'sells': [{'code': o['code'], 'name': o.get('name', o['code']), 'reason': o['reason']} for o in self.pending_sells],
+            'buys': [{'code': o['code'], 'name': o['name'], 'score': o['score']} for o in self.pending_buys],
+        }
+
         return self._generate_results()
 
     def _execute_pending_orders(self, date, date_str: str, universe: dict):
@@ -488,6 +494,68 @@ class BacktestEngine:
         else:
             win_rate = 0
 
+        # ========== 1. 当前持仓详情 ==========
+        current_holdings = []
+        total_value = df['total_value'].iloc[-1]
+        for code, pos in self.positions.items():
+            ratio = pos.market_value / total_value if total_value > 0 else 0
+            current_holdings.append({
+                'code': code,
+                'name': pos.name,
+                'shares': round(pos.shares, 2),
+                'cost_price': round(pos.cost_price, 4),
+                'current_price': round(pos.current_price, 4),
+                'market_value': round(pos.market_value, 2),
+                'ratio': round(ratio, 4),
+                'profit_pct': round(pos.profit_pct, 4),
+                'hold_days': pos.hold_days,
+                'entry_date': pos.entry_date,
+            })
+        current_holdings_df = pd.DataFrame(current_holdings).sort_values('market_value', ascending=False) if current_holdings else pd.DataFrame()
+
+        # ========== 2. 历史持仓（已卖出）汇总 ==========
+        historical_holdings = []
+        if not trade_df.empty:
+            sell_df = trade_df[trade_df['action'] == 'SELL'].copy()
+            if not sell_df.empty and 'profit_amount' in sell_df.columns:
+                sell_df['profit_amount_num'] = pd.to_numeric(sell_df['profit_amount'], errors='coerce')
+                for code in sell_df['code'].unique():
+                    code_sells = sell_df[sell_df['code'] == code]
+                    total_profit = code_sells['profit_amount_num'].sum()
+                    trade_count = len(code_sells)
+                    win_count = len(code_sells[code_sells['profit_amount_num'] > 0])
+                    name = code_sells['name'].iloc[0] if 'name' in code_sells.columns else code
+                    historical_holdings.append({
+                        'code': code,
+                        'name': name,
+                        'trade_count': trade_count,
+                        'win_count': win_count,
+                        'total_profit': round(total_profit, 2),
+                        'avg_profit': round(total_profit / trade_count, 2) if trade_count > 0 else 0,
+                    })
+        historical_holdings_df = pd.DataFrame(historical_holdings).sort_values('total_profit', ascending=False) if historical_holdings else pd.DataFrame()
+
+        # ========== 3. 调仓计划（下一个交易日）==========
+        rebalance_plan = []
+        last_date = self.all_dates[-1] if self.all_dates else None
+        if last_date and hasattr(self, '_last_day_signals'):
+            signals = self._last_day_signals
+            for item in signals.get('sells', []):
+                rebalance_plan.append({
+                    'action': '卖出',
+                    'code': item['code'],
+                    'name': item.get('name', item['code']),
+                    'reason': item.get('reason', ''),
+                })
+            for item in signals.get('buys', []):
+                rebalance_plan.append({
+                    'action': '买入',
+                    'code': item['code'],
+                    'name': item.get('name', item['code']),
+                    'reason': f"排名得分: {item.get('score', 0):.2f}",
+                })
+        rebalance_plan_df = pd.DataFrame(rebalance_plan) if rebalance_plan else pd.DataFrame()
+
         results = {
             'strategy_name': self.strategy['name'],
             'period': f"{self.start_date} ~ {self.end_date}",
@@ -502,6 +570,9 @@ class BacktestEngine:
             'daily_values': df,
             'trade_log': trade_df,
             'positions': self.positions,
+            'current_holdings': current_holdings_df,
+            'historical_holdings': historical_holdings_df,
+            'rebalance_plan': rebalance_plan_df,
         }
 
         print(f"\n{'='*60}")
