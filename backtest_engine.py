@@ -493,14 +493,15 @@ class BacktestEngine:
             'period': f"{self.start_date} ~ {self.end_date}",
             'initial_capital': self.initial_capital,
             'final_value': round(df['total_value'].iloc[-1], 2),
-            'total_return': f"{total_return:.2%}",
-            'annual_return': f"{annual_return:.2%}",
-            'max_drawdown': f"{max_drawdown:.2%}",
+            'total_return': float(total_return),
+            'annual_return': float(annual_return),
+            'max_drawdown': float(max_drawdown),
             'sharpe_ratio': round(sharpe, 2),
             'total_trades': len(self.trade_log),
-            'win_rate': f"{win_rate:.2%}",
+            'win_rate': float(win_rate),
             'daily_values': df,
-            'trade_log': trade_df
+            'trade_log': trade_df,
+            'positions': self.positions,
         }
 
         print(f"\n{'='*60}")

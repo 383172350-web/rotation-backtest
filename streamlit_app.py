@@ -574,11 +574,11 @@ def show_results(results):
     st.subheader("📈 回测统计")
     cols = st.columns(5)
     metrics = [
-        ("总收益率", f"{results.get('total_return', 0)*100:.2f}%", "#4CAF50" if results.get('total_return', 0) > 0 else "#F44336"),
-        ("年化收益", f"{results.get('annual_return', 0)*100:.2f}%", "#4CAF50" if results.get('annual_return', 0) > 0 else "#F44336"),
-        ("最大回撤", f"{results.get('max_drawdown', 0)*100:.2f}%", "#FF9800"),
+        ("总收益率", f"{results.get('total_return', 0) * 100:.2f}%", "#4CAF50" if results.get('total_return', 0) > 0 else "#F44336"),
+        ("年化收益", f"{results.get('annual_return', 0) * 100:.2f}%", "#4CAF50" if results.get('annual_return', 0) > 0 else "#F44336"),
+        ("最大回撤", f"{results.get('max_drawdown', 0) * 100:.2f}%", "#FF9800"),
         ("夏普比率", f"{results.get('sharpe_ratio', 0):.2f}", "#2196F3"),
-        ("胜率", f"{results.get('win_rate', 0)*100:.1f}%", "#2196F3"),
+        ("胜率", f"{results.get('win_rate', 0) * 100:.1f}%", "#2196F3"),
     ]
     for i, (label, value, color) in enumerate(metrics):
         with cols[i]:
@@ -611,7 +611,15 @@ def show_results(results):
     if 'positions' in results and results['positions']:
         pos = []
         for code, p in results['positions'].items():
-            pos.append({'代码': code, '名称': p.get('name', code), '数量': p.get('shares', 0), '成本': f"{p.get('cost_price', 0):.3f}", '现价': f"{p.get('current_price', 0):.3f}", '市值': f"{p.get('market_value', 0):.2f}", '收益率': f"{p.get('profit_pct', 0)*100:.2f}%"})
+            pos.append({
+                '代码': code,
+                '名称': getattr(p, 'name', code),
+                '数量': getattr(p, 'shares', 0),
+                '成本': f"{getattr(p, 'cost_price', 0):.3f}",
+                '现价': f"{getattr(p, 'current_price', 0):.3f}",
+                '市值': f"{getattr(p, 'market_value', 0):.2f}",
+                '收益率': f"{getattr(p, 'profit_pct', 0) * 100:.2f}%"
+            })
         st.dataframe(pd.DataFrame(pos), use_container_width=True)
     else:
         st.info("当前无持仓")
