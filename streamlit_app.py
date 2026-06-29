@@ -504,7 +504,31 @@ def main():
         commission = st.number_input("手续费", min_value=0.0, max_value=0.01, value=0.0001, format="%.4f", key="comm")
         slippage = st.number_input("滑点", min_value=0.0, max_value=0.05, value=0.001, format="%.3f", key="slip")
         benchmark = st.text_input("基准", value=preset_data.get("benchmark", "sh510300"), key="bench")
-        alternative_asset = st.text_input("替代资产（闲置资金配置）", value=preset_data.get("alternative_asset", ""), key="alt_asset", help="例如：sh511880（银华日利）")
+        
+        # 替代资产：输入框 + 添加按钮，更直观
+        st.markdown("**替代资产（闲置资金配置）**")
+        col_alt1, col_alt2 = st.columns([3, 1])
+        with col_alt1:
+            alt_input = st.text_input("代码", value=preset_data.get("alternative_asset", ""), key="alt_input", label_visibility="collapsed", help="例如：sh511880（银华日利）")
+        with col_alt2:
+            alt_set = st.button("➕ 设置", key="alt_set_btn")
+        
+        # 初始化 session_state
+        if 'alt_asset' not in st.session_state:
+            st.session_state.alt_asset = preset_data.get("alternative_asset", "")
+        
+        if alt_set and alt_input.strip():
+            st.session_state.alt_asset = alt_input.strip()
+            st.success(f"✅ 已设置替代资产: {alt_input.strip()}")
+        
+        alternative_asset = st.session_state.alt_asset
+        
+        # 显示当前替代资产
+        if alternative_asset:
+            alt_name = POOL_DF[POOL_DF['代码'] == alternative_asset]['名称'].values[0] if alternative_asset in POOL_DF['代码'].values else "替代资产"
+            st.info(f"当前替代资产: **{alternative_asset}** {alt_name}")
+        else:
+            st.caption("未设置替代资产，闲置资金将保留为现金")
 
     # ---------- 主页面 ----------
     # 顶部回测按钮区域
