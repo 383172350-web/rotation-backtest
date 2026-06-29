@@ -122,14 +122,27 @@ OPS = [">", "<", ">=", "<=", "==", "!="]
 PRESETS = {
     "🎯 自定义策略": {},
     "📈 全品类DIFv轮动": {
-        "selected_codes": ["sh513100", "sh518880", "sh510300", "sh512100", "sz159915", "sh588000", "sh513500", "sh513030", "sh513520", "sz159980", "sz159981", "sz159985", "sh501018"],
+        "selected_codes": ["sh512100", "sh513100", "sh513500", "sh518880", "sz159985",
+                         "sz159981", "sz159980", "sh513030", "sh513520", "sh510300",
+                         "sz159949", "sh513050", "sh501018"],
         "alternative_asset": "sh511880",
         "rank_formula": "(MACD_DIF(12,26,9) / ATR(26)) * 100",
         "rank_direction": "desc",
-        "max_count": 5, "position_mode": "fixed",
-        "buy_rules": ["rank < 6", "close > MA(20)"],
-        "sell_rules": ["rank > 6", "returns(1) < -0.03"],
-        "rebalance_freq": "interval", "rebalance_interval": 2,
+        "max_count": 1, "position_mode": "fixed",
+        "buy_rules": [
+            "close > MA(5)",
+            "close > MA(20)",
+            "MA(10) > MA(20)",
+            "MA(5) > MA(10)",
+            "(MACD_DIF(12,26,9) / ATR(26)) * 100 < 120",
+            "rank < 7"
+        ],
+        "sell_rules": [
+            "rank > 6",
+            "returns(1) < -0.03",
+            "returns(20) > 0.25"
+        ],
+        "rebalance_freq": "interval", "rebalance_interval": 5,
         "start_date": "2020-01-01", "initial_capital": 100000,
         "benchmark": "sh510300",
     },

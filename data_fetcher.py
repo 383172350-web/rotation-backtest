@@ -8,8 +8,11 @@ from typing import Optional
 import os
 
 
-# 本地数据目录（默认项目内，可通过环境变量覆盖）
+# 本地数据目录（优先用户本地路径，其次项目内，最后环境变量）
+USER_DATA_DIR = r"D:\qmt_data\ETF\1d"
 LOCAL_DATA_DIR = os.environ.get('ETF_DATA_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ETF", "1d"))
+if os.path.exists(USER_DATA_DIR) and os.path.isdir(USER_DATA_DIR):
+    LOCAL_DATA_DIR = USER_DATA_DIR
 
 
 def fetch_kline(code: str, start_date: str, end_date: str,
