@@ -156,7 +156,7 @@ class BacktestEngine:
                 'total_value': total_value,
                 'cash': self.cash,
                 'positions_value': total_value - self.cash,
-                'num_positions': len(self.positions)
+                'hold_count': len(self.positions)
             })
 
         return self._generate_results()
