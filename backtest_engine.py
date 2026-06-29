@@ -511,6 +511,23 @@ class BacktestEngine:
                 'hold_days': pos.hold_days,
                 'entry_date': pos.entry_date,
             })
+        # 添加替代资产（现金等效）持仓
+        if self.alternative_asset and self.cash > 0:
+            alt_code = self.alternative_asset['code']
+            alt_name = self.alternative_asset.get('name', '替代资产')
+            alt_ratio = self.cash / total_value if total_value > 0 else 0
+            current_holdings.append({
+                'code': alt_code,
+                'name': alt_name,
+                'shares': round(self.cash, 2),
+                'cost_price': 1.0,
+                'current_price': 1.0,
+                'market_value': round(self.cash, 2),
+                'ratio': round(alt_ratio, 4),
+                'profit_pct': 0.0,
+                'hold_days': 0,
+                'entry_date': '-',
+            })
         current_holdings_df = pd.DataFrame(current_holdings).sort_values('market_value', ascending=False) if current_holdings else pd.DataFrame()
 
         # ========== 2. 历史持仓（已卖出）汇总 ==========

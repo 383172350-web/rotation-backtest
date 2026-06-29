@@ -172,10 +172,14 @@ PRESETS = {
 #  缓存数据
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_data(codes_json, start_date, end_date):
+def get_data(codes_json, start_date, end_date, alt_code=""):
     codes = json.loads(codes_json)
     all_data = {}
-    for item in codes:
+    # 合并替代资产到数据获取列表
+    fetch_codes = list(codes)
+    if alt_code and alt_code.strip():
+        fetch_codes.append({"code": alt_code.strip(), "name": "替代资产"})
+    for item in fetch_codes:
         code = item['code']
         try:
             start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
@@ -184,10 +188,11 @@ def get_data(codes_json, start_date, end_date):
             if not df.empty and len(df) > 60:
                 df['date'] = pd.to_datetime(df['date'])
                 all_data[code] = df
-            else:
+            elif code != alt_code:
                 st.warning(f"{code} 数据不足或为空，已跳过")
         except Exception as e:
-            st.warning(f"获取 {code} 失败: {e}")
+            if code != alt_code:
+                st.warning(f"获取 {code} 失败: {e}")
     return all_data
 
 # ============================================================
@@ -539,7 +544,7 @@ def main():
             status_text.text("📊 正在下载行情数据...")
             progress_bar.progress(30)
             codes_json = json.dumps(universe)
-            all_data = get_data(codes_json, form_data["start_date"], form_data["end_date"])
+            all_data = get_data(codes_json, form_data["start_date"], form_data["end_date"], alternative_asset)
 
             progress_bar.progress(50)
             if not all_data:
