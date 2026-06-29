@@ -123,6 +123,7 @@ PRESETS = {
     "🎯 自定义策略": {},
     "📈 全品类DIFv轮动": {
         "selected_codes": ["sh513100", "sh518880", "sh510300", "sh512100", "sz159915", "sh588000", "sh513500", "sh513030", "sh513520", "sz159980", "sz159981", "sz159985", "sh501018"],
+        "alternative_asset": "sh511880",
         "rank_formula": "(MACD_DIF(12,26,9) / ATR(26)) * 100",
         "rank_direction": "desc",
         "max_count": 5, "position_mode": "fixed",
@@ -498,6 +499,7 @@ def main():
         commission = st.number_input("手续费", min_value=0.0, max_value=0.01, value=0.0001, format="%.4f", key="comm")
         slippage = st.number_input("滑点", min_value=0.0, max_value=0.05, value=0.001, format="%.3f", key="slip")
         benchmark = st.text_input("基准", value=preset_data.get("benchmark", "sh510300"), key="bench")
+        alternative_asset = st.text_input("替代资产（闲置资金配置）", value=preset_data.get("alternative_asset", ""), key="alt_asset", help="例如：sh511880（银华日利）")
 
         st.divider()
         run_btn = st.button("🚀 运行回测", type="primary", use_container_width=True)
@@ -528,7 +530,7 @@ def main():
                 "start_date": start_date.strftime("%Y-%m-%d"),
                 "end_date": end_date.strftime("%Y-%m-%d"),
                 "initial_capital": initial_capital, "commission": commission, "slippage": slippage,
-                "benchmark": benchmark,
+                "benchmark": benchmark, "alternative_asset": alternative_asset,
             }
             config = build_config(form_data)
 
