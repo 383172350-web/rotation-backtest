@@ -122,7 +122,7 @@ OPS = [">", "<", ">=", "<=", "==", "!="]
 PRESETS = {
     "🎯 自定义策略": {},
     "📈 全品类DIFv轮动": {
-        "selected_codes": ["sh513100", "sh518880", "sh510300", "sh512100", "sz159915", "sh588000", "sh513500", "sh513030"],
+        "selected_codes": ["sh513100", "sh518880", "sh510300", "sh512100", "sz159915", "sh588000", "sh513500", "sh513030", "sh513520", "sz159980", "sz159981", "sz159985", "sh501018"],
         "rank_formula": "(MACD_DIF(12,26,9) / ATR(26)) * 100",
         "rank_direction": "desc",
         "max_count": 5, "position_mode": "fixed",

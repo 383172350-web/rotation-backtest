@@ -103,7 +103,8 @@ class BacktestEngine:
             df = compute_all_indicators(df)
             self.all_data[code] = df
             # 只保留股票池标的（排除替代资产、基准等）的交易日交集
-            if not code.startswith('__') and code != self.alternative_asset.get('code', '__alt__'):
+            alt_code = (self.alternative_asset or {}).get('code', '__alt__')
+            if not code.startswith('__') and code != alt_code:
                 if all_dates_set is None:
                     all_dates_set = set(df.index.tolist())
                 else:
