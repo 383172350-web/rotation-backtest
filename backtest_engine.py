@@ -6,8 +6,9 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-from indicators import compute_all_indicators
-from expression_parser import evaluate_condition, evaluate_score
+from indicators import compute_all_indicators, compute_indicators_for_df
+from expression_parser import evaluate_condition, evaluate_score, _fast_evaluate_simple
+from precompiler import precompute_strategy, has_special_var
 
 
 class Position:
@@ -57,7 +58,7 @@ class BacktestEngine:
         bt = self.strategy['backtest']
         self.initial_capital = bt['initial_capital']
         self.commission = bt.get('commission', 0.0001)
-        self.slippage = bt.get('slippage', 0.001)
+        self.slippage = bt.get('slippage', 0.0)
         self.start_date = bt['start_date']
         self.end_date = bt.get('end_date', datetime.now().strftime("%Y-%m-%d"))
 
@@ -83,6 +84,8 @@ class BacktestEngine:
         self.positions: Dict[str, Position] = {}
         self.trade_log: List[dict] = []
         self.daily_values: List[dict] = []
+        self.daily_positions: List[dict] = []  # 每日持仓明细
+        self.rebalance_plans: List[dict] = []  # 调仓计划记录
 
         self.all_data: Dict[str, pd.DataFrame] = {}
         self.all_dates: List = []
@@ -100,10 +103,19 @@ class BacktestEngine:
             df = df.copy()
             df['date'] = pd.to_datetime(df['date'])
             df = df.set_index('date').sort_index()
-            df = compute_all_indicators(df)
+            # 按需计算指标：只计算策略公式中用到的指标，大幅提速
+            expressions = [self.strategy.get('rank_formula', '')]
+            for rule in self.strategy.get('buy_rules', []):
+                expressions.append(rule.get('condition', '') if isinstance(rule, dict) else str(rule))
+            for rule in self.strategy.get('sell_rules', []):
+                expressions.append(rule.get('condition', '') if isinstance(rule, dict) else str(rule))
+            df = compute_indicators_for_df(df, expressions)
+            # 预计算策略表达式（不涉及特殊变量的）
+            df = precompute_strategy(df, self.strategy)
             self.all_data[code] = df
             # 只保留股票池标的（排除替代资产、基准等）的交易日交集
-            if not code.startswith('__') and code != self.alternative_asset.get('code', '__alt__'):
+            alt_code = self.alternative_asset.get('code', '__alt__') if self.alternative_asset else '__alt__'
+            if not code.startswith('__') and code != alt_code:
                 if all_dates_set is None:
                     all_dates_set = set(df.index.tolist())
                 else:
@@ -158,6 +170,33 @@ class BacktestEngine:
                 'num_positions': len(self.positions)
             })
 
+            # 记录每日持仓明细
+            for code, pos in self.positions.items():
+                self.daily_positions.append({
+                    'date': date_str,
+                    'code': code,
+                    'name': pos.name,
+                    'shares': pos.shares,
+                    'cost_price': round(pos.cost_price, 4),
+                    'current_price': round(pos.current_price, 4),
+                    'market_value': round(pos.market_value, 2),
+                    'profit_pct': round(pos.profit_pct, 4),
+                    'hold_days': pos.hold_days
+                })
+            # 如果当日无持仓，记录空仓状态
+            if not self.positions:
+                self.daily_positions.append({
+                    'date': date_str,
+                    'code': '',
+                    'name': '空仓',
+                    'shares': 0,
+                    'cost_price': 0,
+                    'current_price': 0,
+                    'market_value': 0,
+                    'profit_pct': 0,
+                    'hold_days': 0
+                })
+
         return self._generate_results()
 
     def _execute_pending_orders(self, date, date_str: str, universe: dict):
@@ -211,9 +250,16 @@ class BacktestEngine:
     def _check_sell_conditions(self, date, date_str: str, universe: dict, alt_code_str: str):
         """
         T日信号：每天检查卖出条件（用收盘价判断），满足则加入待执行队列，次日open价执行。
+        优化：预计算列直接读取；涉及特殊变量的简单条件用 fast_evaluate，不传整df。
         """
         all_rankings = self._rank_candidates(date, universe)
         rank_map = {code: rank for rank, (code, _) in enumerate(all_rankings, 1)}
+
+        sell_rules = self.strategy.get('sell_rules', [])
+        sell_mode = self.strategy.get('sell_match_mode', 'any')
+        # 检查哪些规则有预计算列
+        sample_df = next(iter(self.all_data.values())) if self.all_data else None
+        has_precols = [f'__sell_{i}' in sample_df.columns for i in range(len(sell_rules))] if sample_df is not None else [False]*len(sell_rules)
 
         for code, pos in self.positions.items():
             if code == alt_code_str:
@@ -225,11 +271,6 @@ class BacktestEngine:
             if date not in df.index:
                 continue
 
-            row_idx = df.index.get_loc(date)
-            if row_idx < 1:
-                continue
-
-            snapshot = df.iloc[:row_idx+1].copy()
             current_rank = rank_map.get(code, 999)
             extra_vars = {
                 'profit': pos.profit_pct,
@@ -237,20 +278,29 @@ class BacktestEngine:
                 'rank': current_rank
             }
 
-            sell_rules = self.strategy.get('sell_rules', [])
-            # match_mode: all=全部满足(AND), any=满足任一(OR), 默认any(卖出倾向宽松)
-            sell_mode = self.strategy.get('sell_match_mode', 'any')
             sell_results = []
             sell_reason = ""
 
-            for rule in sell_rules:
+            for i, rule in enumerate(sell_rules):
                 condition = rule['condition']
+                met = False
                 try:
-                    result = evaluate_condition(condition, snapshot, extra_vars)
-                    if isinstance(result, pd.Series):
-                        met = bool(result.iloc[-1])
+                    if has_precols[i] and not has_special_var(condition):
+                        # 预计算列直接读取
+                        val = df.loc[date, f'__sell_{i}']
+                        met = bool(val)
                     else:
-                        met = bool(result)
+                        # 先尝试简单条件快速求值（不涉及df操作）
+                        fast_result = _fast_evaluate_simple(condition, extra_vars)
+                        if fast_result is not None:
+                            met = fast_result
+                        else:
+                            # 回退到 ExpressionParser（复杂表达式），传入整df不切片
+                            result = evaluate_condition(condition, df, extra_vars)
+                            if isinstance(result, pd.Series):
+                                met = bool(result.iloc[-1])
+                            else:
+                                met = bool(result)
                     sell_results.append(met)
                     if met:
                         sell_reason = rule.get('description', condition)
@@ -258,19 +308,23 @@ class BacktestEngine:
                     sell_results.append(False)
 
             should_sell = all(sell_results) if sell_mode == 'all' else any(sell_results)
-
             if should_sell:
                 self.pending_sells.append({'code': code, 'reason': sell_reason})
+                # 记录调仓计划（卖出）
+                self.rebalance_plans.append({
+                    'date': date_str,
+                    'plan_type': 'SELL_PLAN',
+                    'code': code,
+                    'name': pos.name,
+                    'detail': sell_reason,
+                    'profit_pct': round(pos.profit_pct, 4),
+                    'hold_days': pos.hold_days
+                })
 
     def _rebalance_buy(self, date, date_str: str, universe: dict):
         """
         只在轮动日执行：排名 + 条件买入 + 替代资产管理。
-        
-        核心逻辑：
-        - 全量排名（已持仓 + 未持仓一起排）
-        - 已持仓的品种：只要不触发卖出条件就继续持有，不因排名让位
-        - 未持仓的品种：排名靠前的依次检查买入条件，满足则买入
-        - 买入直到满 max_count 为止
+        优化：预计算列直接读取；涉及特殊变量的简单条件用 fast_evaluate。
         """
         alt_code_str = self.alternative_asset['code'] if self.alternative_asset else ''
 
@@ -285,6 +339,13 @@ class BacktestEngine:
         if available_slots <= 0:
             return
 
+        buy_rules = self.strategy.get('buy_rules', [])
+        buy_mode = self.strategy.get('buy_match_mode', 'all')
+        # 检查哪些规则有预计算列
+        sample_df = next(iter(self.all_data.values())) if self.all_data else None
+        has_precols = [f'__buy_{i}' in sample_df.columns for i in range(len(buy_rules))] if sample_df is not None else [False]*len(buy_rules)
+
+        planned_buys = []
         # 3. 检查买入条件：从排名靠前的未持仓品种中选入
         for code, score in rankings:
             if code in self.positions:
@@ -300,22 +361,30 @@ class BacktestEngine:
             if row_idx < 1:
                 continue
 
-            snapshot = df.iloc[:row_idx+1].copy()
             current_rank = rank_map_for_buy.get(code, 999)
-
-            buy_rules = self.strategy.get('buy_rules', [])
-            # match_mode: all=全部满足(AND), any=满足任一(OR), 默认all(买入倾向严格)
-            buy_mode = self.strategy.get('buy_match_mode', 'all')
+            extra_vars = {'rank': current_rank}
             buy_results = []
 
-            for rule in buy_rules:
+            for i, rule in enumerate(buy_rules):
                 condition = rule['condition']
+                met = False
                 try:
-                    result = evaluate_condition(condition, snapshot, {'rank': current_rank})
-                    if isinstance(result, pd.Series):
-                        met = bool(result.iloc[-1])
+                    if has_precols[i] and not has_special_var(condition):
+                        # 预计算列直接读取
+                        val = df.loc[date, f'__buy_{i}']
+                        met = bool(val)
                     else:
-                        met = bool(result)
+                        # 先尝试简单条件快速求值
+                        fast_result = _fast_evaluate_simple(condition, extra_vars)
+                        if fast_result is not None:
+                            met = fast_result
+                        else:
+                            # 回退到 ExpressionParser，传入整df不切片
+                            result = evaluate_condition(condition, df, extra_vars)
+                            if isinstance(result, pd.Series):
+                                met = bool(result.iloc[-1])
+                            else:
+                                met = bool(result)
                     buy_results.append(met)
                 except Exception:
                     buy_results.append(False)
@@ -323,14 +392,31 @@ class BacktestEngine:
             all_conditions_met = all(buy_results) if buy_mode == 'all' else any(buy_results)
 
             if all_conditions_met:
+                planned_buys.append({'code': code, 'name': universe.get(code, code), 'score': score})
                 self.pending_buys.append({'code': code, 'name': universe.get(code, code), 'score': score})
                 equity_count += 1
                 if equity_count >= self.max_count:
                     break
 
+        # 记录调仓计划（买入）
+        for plan in planned_buys:
+            self.rebalance_plans.append({
+                'date': date_str,
+                'plan_type': 'BUY_PLAN',
+                'code': plan['code'],
+                'name': plan['name'],
+                'detail': f"排名得分: {plan['score']:.2f}",
+                'profit_pct': 0,
+                'hold_days': 0
+            })
+
     def _rank_candidates(self, date, universe: dict) -> List[Tuple[str, float]]:
         rank_formula = self.strategy.get('rank_formula', 'returns(20)')
         direction = self.strategy.get('rank_direction', 'desc')
+        # 检查是否有预计算列
+        sample_df = next(iter(self.all_data.values())) if self.all_data else None
+        has_precomputed = '__rank_score' in sample_df.columns if sample_df is not None else False
+        needs_dynamic = has_special_var(rank_formula)
 
         scores = []
         for code in universe:
@@ -344,11 +430,15 @@ class BacktestEngine:
             if row_idx < 60:
                 continue
 
-            snapshot = df.iloc[:row_idx+1].copy()
             try:
-                score = evaluate_score(rank_formula, snapshot)
-                if isinstance(score, pd.Series):
-                    score = score.iloc[-1]
+                if has_precomputed and not needs_dynamic:
+                    # 直接读取预计算列
+                    score = df.loc[date, '__rank_score']
+                else:
+                    # 回退到动态解析，传入整df不切片
+                    score = evaluate_score(rank_formula, df)
+                    if isinstance(score, pd.Series):
+                        score = score.iloc[-1]
                 if not np.isnan(score):
                     scores.append((code, float(score)))
             except Exception:
@@ -472,7 +562,7 @@ class BacktestEngine:
         max_drawdown = df['drawdown'].min()
 
         if df['daily_return'].std() > 0:
-            sharpe = (df['daily_return'].mean() - 0.03/252) / df['daily_return'].std() * np.sqrt(252)
+            sharpe = (df['daily_return'].mean() * 252 - 0.03) / (df['daily_return'].std() * np.sqrt(252))
         else:
             sharpe = 0
 
@@ -499,7 +589,9 @@ class BacktestEngine:
             'total_trades': len(self.trade_log),
             'win_rate': f"{win_rate:.2%}",
             'daily_values': df,
-            'trade_log': trade_df
+            'trade_log': trade_df,
+            'daily_positions': pd.DataFrame(self.daily_positions) if self.daily_positions else pd.DataFrame(),
+            'rebalance_plans': pd.DataFrame(self.rebalance_plans) if self.rebalance_plans else pd.DataFrame()
         }
 
         print(f"\n{'='*60}")

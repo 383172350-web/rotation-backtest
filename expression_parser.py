@@ -85,26 +85,18 @@ class ExpressionParser:
         """
         self.df = df
         self.extra_vars = extra_vars or {}
-        self._prepare_data()
-
-    def _prepare_data(self):
-        """预处理数据，确保所有列可用"""
-        self.data = self.df.copy()
-
-        # 添加额外变量列（标量广播）
-        for key, val in self.extra_vars.items():
-            self.data[key] = val
+        # 不再复制df，extra_vars在_eval_expression中直接查找
 
     def _get_dates(self) -> pd.DatetimeIndex:
         """获取日期索引，兼容 index 和列两种形式"""
-        if isinstance(self.data.index, pd.DatetimeIndex):
-            return self.data.index
-        if 'date' in self.data.columns:
-            return pd.to_datetime(self.data['date'])
-        return pd.to_datetime(self.data.index)
+        if isinstance(self.df.index, pd.DatetimeIndex):
+            return self.df.index
+        if 'date' in self.df.columns:
+            return pd.to_datetime(self.df['date'])
+        return pd.to_datetime(self.df.index)
 
     def _eval_calendar_function(self, func_name: str) -> pd.Series:
-        """评估日历指标函数，返回与 self.data 等长的 Series"""
+        """评估日历指标函数，返回与 self.df 等长的 Series"""
         dates = self._get_dates()
         if func_name == 'year':
             result = dates.year
@@ -113,20 +105,16 @@ class ExpressionParser:
         elif func_name == 'day':
             result = dates.day
         elif func_name == 'weekday':
-            # 1=周一 ... 7=周日
-            # pandas weekday: 0=Mon ... 6=Sun, 转换为 1=Mon ... 7=Sun
-            wd = dates.weekday + 1  # 1=Mon ... 7=Sun (since 0+1=1, 6+1=7)
+            wd = dates.weekday + 1
             result = wd
         elif func_name == 'month_end':
-            # 判断是否为当月最后一个交易日
-            dates_series = pd.Series(dates.values, index=self.data.index)
+            dates_series = pd.Series(dates.values, index=self.df.index)
             next_dates = dates_series.shift(-1)
             result = dates_series.dt.month != next_dates.dt.month
-            # 最后一天（shift 后为 NaT）视为月末
             result = result.fillna(True)
         else:
             raise ValueError(f"未知日历函数: {func_name}")
-        return pd.Series(result.values, index=self.data.index, name=func_name)
+        return pd.Series(result.values, index=self.df.index, name=func_name)
 
     def evaluate(self, expression: str) -> pd.Series:
         """
@@ -179,6 +167,10 @@ class ExpressionParser:
     def _eval_expression(self, expr: str) -> pd.Series:
         """递归计算数值表达式"""
         expr = expr.strip()
+
+        # 先检查extra_vars（特殊变量）
+        if expr in self.extra_vars:
+            return pd.Series(self.extra_vars[expr], index=self.df.index)
 
         # 处理括号
         if expr.startswith('(') and expr.endswith(')'):
@@ -263,13 +255,29 @@ class ExpressionParser:
                     else:
                         return indicators.RSRS_right_zscore(slope, 600)
 
-            # 解析参数
-            params = [int(p.strip()) for p in param_str.split(',')]
+            # 解析参数（支持int和float）
+            def _parse_param(p):
+                p = p.strip()
+                try:
+                    return int(p)
+                except ValueError:
+                    try:
+                        return float(p)
+                    except ValueError:
+                        return p
+            params = [_parse_param(p) for p in param_str.split(',')]
+
+            # penalty惩罚项：penalty(days, threshold, penalty_value)
+            if func_name == 'penalty':
+                days = int(params[0]) if len(params) > 0 else 3
+                threshold = float(params[1]) if len(params) > 1 else -0.05
+                penalty_value = float(params[2]) if len(params) > 2 else -300
+                return indicators.penalty_score(self.df['close'], days, threshold, penalty_value)
 
             # RSRS系列：需要先算slope再算zscore（两步依赖）
             if func_name in ('RSRS_zscore', 'RSRS_right_zscore'):
-                slope_period = params[0] if len(params) > 0 else 18
-                zscore_period = params[1] if len(params) > 1 else 600
+                slope_period = int(params[0]) if len(params) > 0 else 18
+                zscore_period = int(params[1]) if len(params) > 1 else 600
                 slope = indicators.RSRS_slope(self.df['high'], self.df['low'], slope_period)
                 if func_name == 'RSRS_zscore':
                     return indicators.RSRS_zscore(slope, zscore_period)
@@ -278,35 +286,35 @@ class ExpressionParser:
 
             # 多参数函数：KDJ_K(9,3,3), KDJ_D(9,3,3), KDJ_J(9,3,3), MACD_DIF(12,26,9), MACD_DEA(12,26,9), MACD_HIST(12,26,9)
             if func_name in ('KDJ_K', 'KDJ_D', 'KDJ_J'):
-                n = params[0] if len(params) > 0 else 9
-                m1 = params[1] if len(params) > 1 else 3
-                m2 = params[2] if len(params) > 2 else 3
+                n = int(params[0]) if len(params) > 0 else 9
+                m1 = int(params[1]) if len(params) > 1 else 3
+                m2 = int(params[2]) if len(params) > 2 else 3
                 kdj = indicators.KDJ(self.df['high'], self.df['low'], self.df['close'], n, m1, m2)
-                return kdj[func_name.split('_')[1]]  # K, D, J
+                return kdj[func_name.split('_')[1]]
 
             if func_name in ('MACD_DIF', 'MACD_DEA', 'MACD_HIST'):
-                fast = params[0] if len(params) > 0 else 12
-                slow = params[1] if len(params) > 1 else 26
-                signal = params[2] if len(params) > 2 else 9
+                fast = int(params[0]) if len(params) > 0 else 12
+                slow = int(params[1]) if len(params) > 1 else 26
+                signal = int(params[2]) if len(params) > 2 else 9
                 macd = indicators.MACD(self.df['close'], fast, slow, signal)
                 key = {'MACD_DIF': 'DIF', 'MACD_DEA': 'DEA', 'MACD_HIST': 'MACD'}[func_name]
                 return macd[key]
 
             if func_name in ('BOLL_upper', 'BOLL_lower'):
-                n = params[0] if len(params) > 0 else 20
-                std_dev = params[1] if len(params) > 1 else 2
+                n = int(params[0]) if len(params) > 0 else 20
+                std_dev = int(params[1]) if len(params) > 1 else 2
                 boll = indicators.BOLL(self.df['close'], n, std_dev)
                 key = 'upper' if func_name == 'BOLL_upper' else 'lower'
                 return boll[key]
 
             # 单参数函数
-            param = params[0]
+            param = int(params[0]) if isinstance(params[0], (int, float)) else params[0]
             if func_name in self.FUNCTIONS:
                 return self.FUNCTIONS[func_name](self.df, param)
             else:
                 col_name = f"{func_name}_{param}"
-                if col_name in self.data.columns:
-                    return self.data[col_name]
+                if col_name in self.df.columns:
+                    return self.df[col_name]
                 raise ValueError(f"未知函数: {func_name}({param})")
 
         # 处理历史引用：close[20]
@@ -315,19 +323,19 @@ class ExpressionParser:
         if match:
             col_name = match.group(1)
             shift = int(match.group(2))
-            if col_name in self.data.columns:
-                return self.data[col_name].shift(shift)
+            if col_name in self.df.columns:
+                return self.df[col_name].shift(shift)
             raise ValueError(f"未知列: {col_name}")
 
         # 处理带下划线的列名（如 MACD_DIF, ATR_26, returns_20 等）
-        if expr in self.data.columns:
-            return self.data[expr]
+        if expr in self.df.columns:
+            return self.df[expr]
 
         # 处理字段别名：O->open, H->high, L->low, C->close, VOL->volume
         if expr in self.FIELD_ALIASES:
             alias = self.FIELD_ALIASES[expr]
-            if alias in self.data.columns:
-                return self.data[alias]
+            if alias in self.df.columns:
+                return self.df[alias]
             raise ValueError(f"别名 '{expr}' 指向的列 '{alias}' 不存在")
 
         # 处理函数调用带多个参数：MACD_DIF(12,26,9) -> 映射到 MACD_DIF 列
@@ -336,24 +344,49 @@ class ExpressionParser:
         if multi_match:
             func_name = multi_match.group(1)
             params_str = multi_match.group(2)
-            # 尝试多种列名组合：func_name, func_name_params_joined
             candidates = [
-                func_name,  # 直接列名，如 MACD_DIF
-                f"{func_name}_{params_str.replace(',', '_')}",  # 如 ATR_26
+                func_name,
+                f"{func_name}_{params_str.replace(',', '_')}",
             ]
             for candidate in candidates:
-                if candidate in self.data.columns:
-                    return self.data[candidate]
+                if candidate in self.df.columns:
+                    return self.df[candidate]
             raise ValueError(f"未知函数/列: {func_name}({params_str})")
 
         # 处理数字常量
         try:
             val = float(expr)
-            return pd.Series(val, index=self.data.index)
+            return pd.Series(val, index=self.df.index)
         except ValueError:
             pass
 
         raise ValueError(f"无法解析表达式: '{expr}'")
+
+
+def _fast_evaluate_simple(condition: str, extra_vars: dict) -> bool:
+    """
+    快速求值简单条件：只支持 var op number 形式
+    返回 bool 或 None（无法解析时）
+    """
+    m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*(>=|<=|!=|==|>|<)\s*([-\d.]+)$', condition.strip())
+    if not m:
+        return None
+    
+    var = m.group(1)
+    op = m.group(2)
+    val = float(m.group(3))
+    
+    if var not in extra_vars:
+        return None
+    
+    actual = extra_vars[var]
+    if op == '>': return actual > val
+    elif op == '<': return actual < val
+    elif op == '>=': return actual >= val
+    elif op == '<=': return actual <= val
+    elif op == '==': return actual == val
+    elif op == '!=': return actual != val
+    return None
 
 
 def evaluate_condition(expression: str, df: pd.DataFrame,

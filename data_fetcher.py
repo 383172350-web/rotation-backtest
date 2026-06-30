@@ -2,12 +2,14 @@
 数据获取模块
 支持本地pkl + AKShare + Westock 三源自动降级
 优先本地pkl，本地没有则AKShare，AKShare失败则Westock
+下载的数据自动保存到本地pkl，下次优先读取
 """
 import pandas as pd
 import numpy as np
 from typing import Optional, Dict
 import os
 import subprocess
+import datetime
 
 # ========== 本地数据目录配置 ==========
 LOCAL_DATA_DIRS = [
@@ -28,14 +30,95 @@ def _find_local_pkl_dir():
     return None
 
 
+def _ensure_save_dir():
+    """确保有可用于保存pkl的目录，优先D盘，其次C盘"""
+    for d in [r"D:\qmt_data\ETF\1d", r"C:\qmt_data\ETF\1d"]:
+        try:
+            if not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+            return d
+        except PermissionError:
+            continue
+    #  fallback 到项目目录
+    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ETF", "1d")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+
 LOCAL_PKL_DIR = _find_local_pkl_dir()
 
 
-# ========== 主入口：自动降级 ==========
+def _save_to_pkl(code: str, df: pd.DataFrame, save_dir: str = None):
+    """将下载的数据保存为本地pkl，格式与现有数据一致
+    如果本地已有数据，自动合并新旧数据，避免覆盖导致数据丢失
+    code: 如 sh510300
+    df: 标准化的DataFrame (含 date, open, high, low, close, volume)
+    """
+    if df is None or df.empty:
+        return
+    if save_dir is None:
+        save_dir = _ensure_save_dir()
+    pure_code, suffix = _extract_code_suffix(code)
+    if not pure_code or not suffix:
+        return
+    
+    pkl_name = f"{pure_code}_{suffix}_1d.pkl"
+    pkl_path = os.path.join(save_dir, pkl_name)
+    
+    try:
+        # 转换新数据为现有pkl格式：stime(YYYYMMDD字符串) 作为索引，与旧数据格式一致
+        new_df = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
+        new_df['stime'] = pd.to_datetime(new_df['date']).dt.strftime('%Y%m%d')
+        new_df = new_df.set_index('stime').sort_index()
+        new_df = new_df[['open', 'high', 'low', 'close', 'volume']]
+        
+        # 如果本地已有数据，合并新旧数据（保留最新数据，去重）
+        if os.path.exists(pkl_path):
+            old_df = pd.read_pickle(pkl_path)
+            old_count = len(old_df)
+            
+            # 合并并去重（按索引stime去重，保留最新数据）
+            combined = pd.concat([old_df, new_df])
+            combined = combined[~combined.index.duplicated(keep='last')]
+            combined = combined.sort_index()
+            
+            new_count = len(combined) - old_count
+            if new_count > 0:
+                # 显示新旧数据对比
+                old_end = str(old_df.index[-1])
+                new_end = str(combined.index[-1])
+                print(f"[更新] {code}: {old_count}条 -> {len(combined)}条 (+{new_count}条新数据, {old_end}~{new_end})")
+            else:
+                print(f"[跳过] {code}: 本地数据已是最新 ({old_count}条, 截止{old_df.index[-1]})")
+                return
+            save_df = combined
+        else:
+            save_df = new_df
+            print(f"[保存] {code} -> {pkl_path} ({len(save_df)}条, {save_df.index[0]}~{save_df.index[-1]})")
+        
+        save_df.to_pickle(pkl_path)
+    except Exception as e:
+        print(f"[保存失败] {code}: {e}")
+
+
+
+def _is_trading_time():
+    """判断当前是否在交易时间（9:30-15:00）"""
+    now = datetime.datetime.now()
+    t = now.time()
+    return datetime.time(9, 30) <= t <= datetime.time(15, 0)
+
+
 def fetch_kline(code: str, start_date: str, end_date: str,
-                period: str = "day", fq: str = "qfq") -> pd.DataFrame:
+                period: str = "day", fq: str = "qfq", *,
+                auto_save: bool = True) -> pd.DataFrame:
     """
     获取K线数据（自动降级：本地pkl -> AKShare -> Westock）
+    下载成功后自动保存到本地pkl，如果本地数据过期也会自动补充
+    
+    智能策略：
+    - 交易时间（9:30-15:00）：始终从在线下载最新数据，盘中实时变化
+    - 非交易时间：优先本地pkl，核对收盘价是否一致，不一致则强制更新
     
     Args:
         code: 股票代码，如 sh510300 或 510300.SH
@@ -43,19 +126,84 @@ def fetch_kline(code: str, start_date: str, end_date: str,
         end_date: 结束日期 YYYY-MM-DD
         period: day/week/month
         fq: 复权方式 qfq/hfq/bfq
+        auto_save: 下载成功后是否自动保存到本地pkl
     
     Returns:
         DataFrame with columns: date, open, high, low, close, volume, amount
     """
-    # 1. 尝试本地pkl
-    df = _fetch_local_pkl(code, start_date, end_date)
-    if not df.empty:
-        return df
+    today = pd.to_datetime(datetime.datetime.now().strftime('%Y-%m-%d'))
     
-    # 2. 尝试AKShare
+    # ========== 交易时间：始终从在线下载最新数据（解决盘中变化问题）==========
+    if _is_trading_time():
+        try:
+            df = _fetch_akshare(code, start_date, end_date, period, fq)
+            if not df.empty:
+                if auto_save:
+                    _save_to_pkl(code, df)
+                return df
+        except Exception:
+            pass
+        
+        try:
+            df = _fetch_westock(code, start_date, end_date, period, fq)
+            if not df.empty:
+                if auto_save:
+                    _save_to_pkl(code, df)
+                return df
+        except Exception:
+            pass
+        
+        return pd.DataFrame()
+    
+    # ========== 非交易时间：优先本地pkl，核对收盘价 ==========
+    # 1. 尝试本地pkl
+    df_local = _fetch_local_pkl(code, start_date, end_date)
+    if not df_local.empty:
+        last_date = pd.to_datetime(df_local['date'].iloc[-1])
+        end_dt = pd.to_datetime(end_date)
+        
+        # 如果本地数据明显过期（差2天以上），直接下载补充
+        if last_date < end_dt - pd.Timedelta(days=2) and last_date < today - pd.Timedelta(days=2):
+            print(f"[本地过期] {code}: 本地最新={last_date.date()}, 需要补充到={end_date}")
+        else:
+            # 本地数据日期够新，需要核对收盘价是否一致
+            # 下载最近10天数据做对比（减少下载量）
+            verify_start = (today - pd.Timedelta(days=10)).strftime('%Y-%m-%d')
+            try:
+                df_verify = _fetch_akshare(code, verify_start, end_date, period, fq)
+                if not df_verify.empty:
+                    # 找到本地和在线的最新共同交易日
+                    local_last_date = df_local['date'].iloc[-1]
+                    verify_row = df_verify[df_verify['date'] == local_last_date]
+                    local_row = df_local[df_local['date'] == local_last_date]
+                    
+                    if not verify_row.empty and not local_row.empty:
+                        local_close = float(local_row['close'].iloc[0])
+                        verify_close = float(verify_row['close'].iloc[0])
+                        
+                        if abs(local_close - verify_close) < 1e-6:
+                            # 收盘价一致，返回本地数据
+                            return df_local
+                        else:
+                            # 收盘价不一致，强制更新完整数据
+                            print(f"[数据核对] {code}: close不一致 本地={local_close} 在线={verify_close}，强制更新")
+                            df_full = _fetch_akshare(code, start_date, end_date, period, fq)
+                            if not df_full.empty:
+                                if auto_save:
+                                    _save_to_pkl(code, df_full)
+                                return df_full
+            except Exception as e:
+                print(f"[核对失败] {code}: {e}")
+            
+            # 核对失败或不需要核对，返回本地数据
+            return df_local
+    
+    # 2. 本地没有数据或过期，尝试AKShare
     try:
         df = _fetch_akshare(code, start_date, end_date, period, fq)
         if not df.empty:
+            if auto_save:
+                _save_to_pkl(code, df)
             return df
     except Exception:
         pass
@@ -64,6 +212,8 @@ def fetch_kline(code: str, start_date: str, end_date: str,
     try:
         df = _fetch_westock(code, start_date, end_date, period, fq)
         if not df.empty:
+            if auto_save:
+                _save_to_pkl(code, df)
             return df
     except Exception:
         pass
@@ -73,12 +223,12 @@ def fetch_kline(code: str, start_date: str, end_date: str,
 
 def batch_fetch_klines(codes: list, start_date: str, end_date: str,
                         period: str = "day", fq: str = "qfq") -> Dict[str, pd.DataFrame]:
-    """批量获取多只股票K线"""
+    """批量获取多只股票K线，下载成功后自动保存"""
     result = {}
     for item in codes:
         code = item['code'] if isinstance(item, dict) else item
         name = item.get('name', code) if isinstance(item, dict) else code
-        df = fetch_kline(code, start_date, end_date, period, fq)
+        df = fetch_kline(code, start_date, end_date, period, fq, auto_save=True)
         if not df.empty:
             result[code] = df
     return result

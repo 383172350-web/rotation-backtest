@@ -198,6 +198,20 @@ def RSRS_right_zscore(slope: pd.Series, period: int = 600) -> pd.Series:
     return z * scale
 
 
+def penalty_score(close: pd.Series, days: int = 3, threshold: float = -0.05, penalty_value: float = -300) -> pd.Series:
+    """
+    惩罚项：最近days日任意一天跌幅<threshold，则返回penalty_value，否则返回0
+    用于排序时惩罚近期大跌的标的
+    days: 检查天数（默认3）
+    threshold: 跌幅阈值（默认-0.05即-5%）
+    penalty_value: 惩罚分数（默认-300）
+    """
+    daily_ret = close.pct_change()
+    # 最近days日任意一天跌幅<threshold
+    has_drop = (daily_ret < threshold).rolling(window=days, min_periods=1).max().fillna(0)
+    return has_drop * penalty_value
+
+
 def month_end(date_series: pd.Series) -> pd.Series:
     """
     判断是否月末（当月最后交易日）
@@ -281,4 +295,272 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['RSRS_zscore'] = RSRS_zscore(df['RSRS_slope'], period=600)
     df['RSRS_right_zscore'] = RSRS_right_zscore(df['RSRS_slope'], period=600)
 
+def compute_indicators_for_df(df: pd.DataFrame, expressions: list) -> pd.DataFrame:
+    """
+    按需计算指标：只解析表达式中用到的指标，大幅提速
+    expressions: 策略中的公式/规则列表，如 ['(MACD_DIF(12,26,9) / ATR(26)) * 100', 'close > MA(5)', ...]
+    """
+    import re
+    df = df.copy()
+    c = df['close']
+    h = df['high']
+    l = df['low']
+    v = df['volume']
+    
+    # 提取表达式中所有指标调用
+    # 匹配 pattern: MA(5), ATR(26), MACD_DIF(12,26,9), returns(20), etc.
+    pattern = r'(\w+)\s*\(([^)]*)\)'
+    needed = {}
+    for expr in expressions:
+        if not expr:
+            continue
+        for m in re.finditer(pattern, expr):
+            func_name = m.group(1)
+            args_str = m.group(2).strip()
+            args = [int(a.strip()) if a.strip().isdigit() else a.strip()
+                    for a in args_str.split(',') if a.strip()]
+            key = (func_name, tuple(args))
+            needed[key] = (func_name, args)
+    
+    # 去重并按依赖排序
+    computed = {}
+    
+    def _compute(func_name, args):
+        key = (func_name, tuple(args))
+        if key in computed:
+            return computed[key]
+        
+        # MA
+        if func_name == 'MA':
+            n = args[0]
+            col = f'MA_{n}'
+            if col not in df.columns:
+                df[col] = MA(c, n)
+            computed[key] = col
+            return col
+        
+        # EMA
+        if func_name == 'EMA':
+            n = args[0]
+            col = f'EMA_{n}'
+            if col not in df.columns:
+                df[col] = EMA(c, n)
+            computed[key] = col
+            return col
+        
+        # MACD_DIF
+        if func_name == 'MACD_DIF':
+            fast, slow, signal = args[0], args[1], args[2]
+            col = 'MACD_DIF'
+            if col not in df.columns:
+                ema_f = EMA(c, fast)
+                ema_s = EMA(c, slow)
+                df[col] = ema_f - ema_s
+            computed[key] = col
+            return col
+        
+        # MACD_DEA
+        if func_name == 'MACD_DEA':
+            fast, slow, signal = args[0], args[1], args[2]
+            col = 'MACD_DEA'
+            if col not in df.columns:
+                ema_f = EMA(c, fast)
+                ema_s = EMA(c, slow)
+                dif = ema_f - ema_s
+                df[col] = EMA(dif, signal)
+            computed[key] = col
+            return col
+        
+        # MACD_HIST
+        if func_name == 'MACD_HIST':
+            fast, slow, signal = args[0], args[1], args[2]
+            col = 'MACD_HIST'
+            if col not in df.columns:
+                ema_f = EMA(c, fast)
+                ema_s = EMA(c, slow)
+                dif = ema_f - ema_s
+                dea = EMA(dif, signal)
+                df[col] = (dif - dea) * 2
+            computed[key] = col
+            return col
+        
+        # RSI
+        if func_name == 'RSI':
+            n = args[0]
+            col = f'RSI_{n}'
+            if col not in df.columns:
+                df[col] = RSI(c, n)
+            computed[key] = col
+            return col
+        
+        # ATR
+        if func_name == 'ATR':
+            n = args[0]
+            col = f'ATR_{n}'
+            if col not in df.columns:
+                df[col] = ATR(h, l, c, n)
+            computed[key] = col
+            return col
+        
+        # BOLL
+        if func_name == 'BOLL':
+            n = args[0]
+            col = 'BOLL'
+            if col not in df.columns:
+                df['BOLL'] = MA(c, n)
+            computed[key] = 'BOLL'
+            return 'BOLL'
+        
+        # BOLL_upper
+        if func_name == 'BOLL_upper':
+            n, std_dev = args[0], args[1] if len(args) > 1 else 2
+            col = f'BOLL_upper_{n}_{std_dev}'
+            if col not in df.columns:
+                mid = MA(c, n)
+                std = c.rolling(window=n).std()
+                df[col] = mid + std_dev * std
+            computed[key] = col
+            return col
+        
+        # BOLL_lower
+        if func_name == 'BOLL_lower':
+            n, std_dev = args[0], args[1] if len(args) > 1 else 2
+            col = f'BOLL_lower_{n}_{std_dev}'
+            if col not in df.columns:
+                mid = MA(c, n)
+                std = c.rolling(window=n).std()
+                df[col] = mid - std_dev * std
+            computed[key] = col
+            return col
+        
+        # KDJ_K
+        if func_name == 'KDJ_K':
+            n, m1, m2 = args[0], args[1], args[2]
+            col = 'KDJ_K'
+            if col not in df.columns:
+                kdj = KDJ(h, l, c, n, m1, m2)
+                df['KDJ_K'] = kdj['K']
+                df['KDJ_D'] = kdj['D']
+                df['KDJ_J'] = kdj['J']
+            computed[key] = col
+            return col
+        
+        # KDJ_D
+        if func_name == 'KDJ_D':
+            n, m1, m2 = args[0], args[1], args[2]
+            col = 'KDJ_D'
+            if col not in df.columns:
+                kdj = KDJ(h, l, c, n, m1, m2)
+                df['KDJ_K'] = kdj['K']
+                df['KDJ_D'] = kdj['D']
+                df['KDJ_J'] = kdj['J']
+            computed[key] = col
+            return col
+        
+        # KDJ_J
+        if func_name == 'KDJ_J':
+            n, m1, m2 = args[0], args[1], args[2]
+            col = 'KDJ_J'
+            if col not in df.columns:
+                kdj = KDJ(h, l, c, n, m1, m2)
+                df['KDJ_K'] = kdj['K']
+                df['KDJ_D'] = kdj['D']
+                df['KDJ_J'] = kdj['J']
+            computed[key] = col
+            return col
+        
+        # returns
+        if func_name == 'returns':
+            n = args[0]
+            col = f'returns_{n}'
+            if col not in df.columns:
+                df[col] = returns(c, n)
+            computed[key] = col
+            return col
+        
+        # BIAS
+        if func_name == 'BIAS':
+            n = args[0]
+            col = f'BIAS_{n}'
+            if col not in df.columns:
+                df[col] = BIAS(c, n)
+            computed[key] = col
+            return col
+        
+        # volatility
+        if func_name == 'volatility':
+            n = args[0]
+            col = f'volatility_{n}'
+            if col not in df.columns:
+                df[col] = volatility(c, n)
+            computed[key] = col
+            return col
+        
+        # quality_score
+        if func_name == 'quality_score':
+            n = args[0]
+            col = f'quality_score_{n}'
+            if col not in df.columns:
+                df[col] = quality_score(c, n)
+            computed[key] = col
+            return col
+        
+        # gain_percentile
+        if func_name == 'gain_percentile':
+            n = args[0]
+            col = f'gain_percentile_{n}'
+            if col not in df.columns:
+                df[col] = gain_percentile(c, n)
+            computed[key] = col
+            return col
+        
+        # volume_percentile
+        if func_name == 'volume_percentile':
+            n = args[0]
+            col = f'volume_percentile_{n}'
+            if col not in df.columns:
+                df[col] = volume_percentile(v, n)
+            computed[key] = col
+            return col
+        
+        # RSRS_slope
+        if func_name == 'RSRS_slope':
+            n = args[0]
+            col = 'RSRS_slope'
+            if col not in df.columns:
+                df['RSRS_slope'] = RSRS_slope(h, l, n)
+            computed[key] = col
+            return col
+        
+        # RSRS_zscore
+        if func_name == 'RSRS_zscore':
+            n = args[0] if args else 600
+            col = 'RSRS_zscore'
+            if col not in df.columns:
+                if 'RSRS_slope' not in df.columns:
+                    df['RSRS_slope'] = RSRS_slope(h, l, 18)
+                df['RSRS_zscore'] = RSRS_zscore(df['RSRS_slope'], n)
+            computed[key] = col
+            return col
+        
+        # RSRS_right_zscore
+        if func_name == 'RSRS_right_zscore':
+            n = args[0] if args else 600
+            col = 'RSRS_right_zscore'
+            if col not in df.columns:
+                if 'RSRS_slope' not in df.columns:
+                    df['RSRS_slope'] = RSRS_slope(h, l, 18)
+                df['RSRS_right_zscore'] = RSRS_right_zscore(df['RSRS_slope'], n)
+            computed[key] = col
+            return col
+        
+        # 未知指标
+        computed[key] = func_name
+        return func_name
+    
+    # 计算所有需要的指标
+    for key in needed:
+        func_name, args = needed[key]
+        _compute(func_name, args)
+    
     return df

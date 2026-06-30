@@ -19,23 +19,33 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import BacktestEngine
-from data_fetcher import fetch_kline, batch_fetch_klines, LOCAL_PKL_DIR
+from data_fetcher import fetch_kline, batch_fetch_klines, LOCAL_PKL_DIR, _is_trading_time
+import qmt_adapter
+import qmt_generator
 
 st.set_page_config(layout="wide", page_title="轮动策略回测系统", page_icon="📊", initial_sidebar_state="expanded")
 
 # ============================================================
-#  CSS
+#  CSS（美化版）
 # ============================================================
 st.markdown("""
 <style>
-.main-header { font-size: 2.2rem; font-weight: bold; color: #1f77b4; margin-bottom: 0.5rem; }
-.sub-header { font-size: 1.1rem; color: #666; margin-bottom: 1.5rem; }
+.main-header { font-size: 2.2rem; font-weight: bold; color: #1f77b4; margin-bottom: 0.3rem; }
+.sub-header { font-size: 1.0rem; color: #888; margin-bottom: 1rem; }
 .stButton>button { border-radius: 6px; font-weight: 600; }
-.rule-box { background: #f8f9fa; padding: 8px 12px; border-radius: 6px; margin: 4px 0; border-left: 3px solid #4CAF50; font-size: 0.85rem; }
+.rule-box { background: #f8f9fa; padding: 6px 10px; border-radius: 4px; margin: 2px 0; border-left: 3px solid #4CAF50; font-size: 0.82rem; }
 .rule-box-sell { border-left-color: #F44336; }
-.metric-card { padding: 1rem; border-radius: 8px; text-align: center; color: white; }
-.metric-value { font-size: 1.6rem; font-weight: bold; }
-.metric-label { font-size: 0.8rem; }
+.metric-card { padding: 0.8rem 0.5rem; border-radius: 8px; text-align: center; color: white; box-shadow: 0 2px 6px rgba(0,0,0,0.15); transition: transform 0.15s; }
+.metric-card:hover { transform: translateY(-2px); }
+.metric-value { font-size: 1.5rem; font-weight: bold; }
+.metric-label { font-size: 0.75rem; opacity: 0.9; }
+/* 侧边栏紧凑 */
+[data-testid="stSidebar"] .stMarkdown { margin-bottom: 0.2rem !important; }
+[data-testid="stSidebar"] .stExpander { margin-bottom: 0.3rem !important; }
+[data-testid="stSidebar"] .stNumberInput { margin-bottom: 0.3rem !important; }
+[data-testid="stSidebar"] .stRadio { margin-bottom: 0.3rem !important; }
+[data-testid="stSidebar"] .stDateInput { margin-bottom: 0.3rem !important; }
+[data-testid="stSidebar"] .stTextInput { margin-bottom: 0.3rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -52,6 +62,17 @@ def load_pool():
     return df
 
 POOL_DF = load_pool()
+
+# 大类到小类的映射（双层分类）
+CATEGORY_GROUPS = {
+    "全部": None,
+    "宽基": ["宽基"],
+    "行业": ["行业指数", "科技", "医药医疗", "商业百货", "地产", "金融", "传媒"],
+    "主题": ["新基建", "新能源"],
+    "商品": ["商品/资源"],
+    "跨境": ["港股", "跨境", "中概跨境"],
+    "LOF": ["LOF"],
+}
 
 # ============================================================
 #  系统指标库
@@ -98,9 +119,17 @@ INDICATORS = {
     "volatility(n)": {"name": "波动率", "params": [{"name": "n", "label": "周期", "default": 20, "min": 1, "max": 250}]},
     "gain_percentile(n)": {"name": "涨幅百分位", "params": [{"name": "n", "label": "周期", "default": 250, "min": 1, "max": 500}]},
     "volume_percentile(n)": {"name": "成交量百分位", "params": [{"name": "n", "label": "周期", "default": 250, "min": 1, "max": 500}]},
-    "RSRS_slope(n)": {"name": "RSRS斜率", "params": [{"name": "n", "label": "周期", "default": 18, "min": 1, "max": 100}]},
-    "RSRS_zscore(n)": {"name": "RSRS标准分", "params": [{"name": "n", "label": "周期", "default": 18, "min": 1, "max": 100}]},
-    "RSRS_right_zscore(n)": {"name": "RSRS右偏标准分", "params": [{"name": "n", "label": "周期", "default": 18, "min": 1, "max": 100}]},
+    "RSRS_slope(n)": {"name": "RSRS斜率", "params": [{"name": "n", "label": "斜率周期", "default": 18, "min": 1, "max": 100}]},
+    "RSRS_zscore(n,period)": {"name": "RSRS标准分", "params": [
+        {"name": "n", "label": "斜率周期", "default": 18, "min": 1, "max": 100},
+        {"name": "period", "label": "标准化窗口", "default": 600, "min": 100, "max": 1000}]},
+    "RSRS_right_zscore(n,period)": {"name": "RSRS右偏标准分", "params": [
+        {"name": "n", "label": "斜率周期", "default": 18, "min": 1, "max": 100},
+        {"name": "period", "label": "标准化窗口", "default": 600, "min": 100, "max": 1000}]},
+    "penalty(days,threshold,penalty_value)": {"name": "惩罚项（跌幅扣分）", "params": [
+        {"name": "days", "label": "检查天数", "default": 3, "min": 1, "max": 30},
+        {"name": "threshold", "label": "跌幅阈值", "default": -0.05, "min": -0.5, "max": 0.0, "step": 0.01},
+        {"name": "penalty_value", "label": "惩罚分数", "default": -300, "min": -1000, "max": 0, "step": 10}]},
 }
 
 BASIC_FIELDS = {
@@ -138,34 +167,69 @@ PRESETS = {
         "start_date": "2020-01-01", "initial_capital": 100000,
         "benchmark": "sh510300",
     },
-    "📊 五斗米动量轮动": {
-        "selected_codes": ["sh510050", "sh510300", "sh588000", "sz159915", "sz159531"],
-        "rank_formula": "returns(20)", "rank_direction": "desc",
-        "max_count": 1, "position_mode": "fixed",
-        "buy_rules": ["close > BOLL_upper(17,2)"],
-        "sell_rules": ["close < BOLL_lower(17,2)"],
+    "📊 DIFv动量轮动": {
+        "selected_codes": ["sh512890", "sh515050", "sh513310", "sh513100", "sh513500", "sh513520", "sh513030", "sh518880"],
+        "rank_formula": "(MACD_DIF(12,26,9) / ATR(26)) * 100",
+        "rank_direction": "desc",
+        "max_count": 5, "position_mode": "fixed",
+        "buy_match_mode": "all",
+        "buy_rules": ["close > MA(5)", "(MACD_DIF(12,26,9) / ATR(26)) * 100 > 0", "(MACD_DIF(12,26,9) / ATR(26)) * 100 < 120"],
+        "sell_match_mode": "any",
+        "sell_rules": ["rank > 5"],
         "rebalance_freq": "daily", "rebalance_interval": 1,
-        "start_date": "2020-01-01", "initial_capital": 100000,
+        "start_date": "2020-03-12", "initial_capital": 100000,
         "benchmark": "sh510300",
     },
-    "🏆 精选LOF轮动": {
-        "selected_codes": ["sz163402", "sz163417", "sz161903", "sz162703", "sz161005"],
-        "rank_formula": "returns(20) + quality_score(20)", "rank_direction": "desc",
-        "max_count": 1, "position_mode": "fixed",
-        "buy_rules": ["returns(20) > 0.05"],
-        "sell_rules": ["rank > 1"],
-        "rebalance_freq": "interval", "rebalance_interval": 20,
-        "start_date": "2020-01-01", "initial_capital": 100000,
+    "🚀 科技成长DIFv轮动": {
+        "selected_codes": ["sh588200", "sz159819", "sh515050", "sh515880", "sh516510", "sz159852", "sh512480", "sz159732", "sh588250", "sh516010", "sh562500", "sh512660", "sz159667", "sz159992", "sz159883", "sh516800", "sh588010", "sh515790", "sh515700", "sz159755", "sz159566", "sh515400", "sz159542", "sh563010", "sz159786", "sz159997"],
+        "rank_formula": "(MACD_DIF(12,26,9) / ATR(26)) * 100",
+        "rank_direction": "desc",
+        "max_count": 10, "position_mode": "fixed",
+        "buy_match_mode": "all",
+        "buy_rules": ["close > MA(5)", "(MACD_DIF(12,26,9) / ATR(26)) * 100 > 0", "(MACD_DIF(12,26,9) / ATR(26)) * 100 < 120"],
+        "sell_match_mode": "any",
+        "sell_rules": ["rank > 10"],
+        "rebalance_freq": "daily", "rebalance_interval": 1,
+        "start_date": "2024-02-08", "initial_capital": 100000,
         "benchmark": "sh510300",
     },
-    "🔮 动量+RSRS轮动": {
+    "🔮 RSRS动量轮动": {
         "selected_codes": ["sh518880", "sh513100", "sh588220", "sz159915", "sh511090"],
-        "rank_formula": "RSRS_zscore(18)", "rank_direction": "desc",
+        "rank_formula": "RSRS_right_zscore(18)",
+        "rank_direction": "desc",
         "max_count": 1, "position_mode": "fixed",
-        "buy_rules": ["RSRS_zscore(18) > 0.7"],
-        "sell_rules": ["RSRS_zscore(18) < -0.7"],
+        "buy_match_mode": "any",
+        "buy_rules": ["RSRS_right_zscore(18) > 0.15", "RSRS_right_zscore(18) > 0.03 AND close > MA(5)", "close > MA(10)"],
+        "sell_match_mode": "all",
+        "sell_rules": ["profit < -0.03"],
         "rebalance_freq": "daily", "rebalance_interval": 1,
-        "start_date": "2020-01-01", "initial_capital": 100000,
+        "start_date": "2020-03-01", "initial_capital": 100000,
+        "benchmark": "sh510300",
+    },
+    "🏆 精选LOF轮动（含惩罚）": {
+        "selected_codes": ["sz163402", "sz163417", "sz161903", "sz162703", "sz161005"],
+        "rank_formula": "returns(20) + penalty(3, -0.05, -300)",
+        "rank_direction": "desc",
+        "max_count": 1, "position_mode": "fixed",
+        "buy_match_mode": "all",
+        "buy_rules": ["returns(20) > 0.05", "(close - MA(20)) / volatility(20) > 0"],
+        "sell_match_mode": "any",
+        "sell_rules": ["returns(20) < 0", "rank > 1"],
+        "rebalance_freq": "interval", "rebalance_interval": 20,
+        "start_date": "2020-03-01", "initial_capital": 100000,
+        "benchmark": "sh510300",
+    },
+    "📉 五斗米动量轮动": {
+        "selected_codes": ["sh510050", "sh510300", "sh588000", "sz159915", "sz159531"],
+        "rank_formula": "close / MA(12) * 100 - 100",
+        "rank_direction": "desc",
+        "max_count": 1, "position_mode": "fixed",
+        "buy_match_mode": "all",
+        "buy_rules": ["close > BOLL_upper(17,2)"],
+        "sell_match_mode": "all",
+        "sell_rules": ["close / MA(12) * 100 - 100 < 0"],
+        "rebalance_freq": "daily", "rebalance_interval": 1,
+        "start_date": "2020-03-01", "initial_capital": 100000,
         "benchmark": "sh510300",
     },
 }
@@ -173,21 +237,37 @@ PRESETS = {
 # ============================================================
 #  缓存数据获取
 # ============================================================
-@st.cache_data(ttl=3600, show_spinner=False)
+
 def get_data(codes_list, start_date, end_date, alt_code=""):
-    """获取数据：本地pkl优先，无本地则在线获取"""
+    """获取数据：本地pkl优先，无本地或过期则在线获取并自动保存
+    智能缓存：
+    - 交易时间（9:30-15:00）：fetch_kline 强制在线下载，盘中数据实时变化
+    - 非交易时间：1小时缓存，减少重复下载
+    """
+    # 生成缓存键
+    cache_key = f"data_cache_{hash(str(codes_list)+start_date+end_date+alt_code)}"
+    
+    # 非交易时间：尝试使用缓存（1小时有效）
+    if not _is_trading_time():
+        if cache_key in st.session_state:
+            cached = st.session_state[cache_key]
+            age = (datetime.datetime.now() - cached['time']).total_seconds()
+            if age < 3600:  # 1小时内
+                return cached['data']
+    
+    # 交易时间 或 缓存过期：重新获取数据
     all_codes = list(codes_list)
     if alt_code and alt_code.strip():
         all_codes.append({"code": alt_code.strip(), "name": "替代资产"})
     
     start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
-    warmup = (start_dt - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    warmup = (start_dt - pd.Timedelta(days=400)).strftime('%Y-%m-%d')
     
     all_data = {}
     for item in all_codes:
         code = item['code'] if isinstance(item, dict) else item
         try:
-            df = fetch_kline(code, warmup, end_date)
+            df = fetch_kline(code, warmup, end_date, auto_save=True)
             if not df.empty and len(df) > 60:
                 df['date'] = pd.to_datetime(df['date'])
                 all_data[code] = df
@@ -196,6 +276,12 @@ def get_data(codes_list, start_date, end_date, alt_code=""):
         except Exception as e:
             if code != alt_code:
                 st.warning(f"获取 {code} 失败: {e}")
+    
+    # 保存到缓存（供非交易时间使用）
+    st.session_state[cache_key] = {
+        'data': all_data,
+        'time': datetime.datetime.now()
+    }
     return all_data
 
 
@@ -252,9 +338,12 @@ def render_indicator_params(key_prefix, selected_indicator):
     cols = st.columns(len(info["params"]))
     for i, p in enumerate(info["params"]):
         with cols[i]:
+            step = p.get("step")
+            kwargs = {"min_value": p["min"], "max_value": p["max"], "value": p["default"]}
+            if step is not None:
+                kwargs["step"] = step
             params[p["name"]] = st.number_input(
-                p["label"], min_value=p["min"], max_value=p["max"], value=p["default"],
-                key=f"{key_prefix}_param_{p['name']}"
+                p["label"], key=f"{key_prefix}_param_{p['name']}", **kwargs
             )
     param_str = ",".join(str(params[p["name"]]) for p in info["params"])
     func_name = selected_indicator.split("(")[0]
@@ -287,6 +376,8 @@ def formula_editor(key_prefix, preset_formula=""):
     # 初始化
     if formula_key not in st.session_state:
         st.session_state[formula_key] = preset_formula
+        # 同时设置editor_key，确保widget重新初始化时使用新值（策略切换时）
+        st.session_state[editor_key] = preset_formula
     
     # ===== 关键：在widget渲染前处理待更新 =====
     # 按钮回调设置了pending，rerun后在这里先更新editor缓存
@@ -339,9 +430,13 @@ def formula_editor(key_prefix, preset_formula=""):
         cols = st.columns(len(info["params"]))
         for i, p in enumerate(info["params"]):
             with cols[i]:
+                # key 中嵌入指标名，切换指标时参数完全重置，避免缓存串扰
+                step = p.get("step")
+                kwargs = {"min_value": p["min"], "max_value": p["max"], "value": p["default"]}
+                if step is not None:
+                    kwargs["step"] = step
                 params[p["name"]] = st.number_input(
-                    p["label"], min_value=p["min"], max_value=p["max"], value=p["default"],
-                    key=f"{key_prefix}_param_{p['name']}"
+                    p["label"], key=f"{key_prefix}_{selected_ind}_param_{p['name']}", **kwargs
                 )
         param_str = ",".join(str(params[p["name"]]) for p in info["params"])
         func_name = selected_ind.split("(")[0]
@@ -374,7 +469,7 @@ def _get_element_desc(x):
 #  规则构建器（买入/卖出规则）
 # ============================================================
 def rule_builder(key_prefix, existing_rules, title, color="green"):
-    """规则构建器：万能公式编辑器 + 添加按钮"""
+    """规则构建器：已有规则折叠 + 公式编辑器"""
     
     # 向后兼容
     rules = []
@@ -390,28 +485,27 @@ def rule_builder(key_prefix, existing_rules, title, color="green"):
     
     current_rules = st.session_state[rules_key]
     
-    # 显示已有规则
-    for i, rule in enumerate(current_rules):
-        c1, c2 = st.columns([8, 1])
-        with c1:
-            display = rule.get('description', rule.get('condition', ''))
-            border_color = "#4CAF50" if color == "green" else "#F44336"
-            st.markdown(f'<div class="rule-box" style="border-left-color: {border_color};"><b>{i+1}.</b> {display}</div>', unsafe_allow_html=True)
-        with c2:
-            if st.button("🗑️", key=f"{key_prefix}_del_{i}"):
-                current_rules.pop(i)
-                st.session_state[rules_key] = current_rules
-                st.rerun()
+    # 已有规则（折叠）
+    with st.expander(f"📋 已有 {len(current_rules)} 条规则", expanded=False):
+        for i, rule in enumerate(current_rules):
+            c1, c2 = st.columns([8, 1])
+            with c1:
+                display = rule.get('description', rule.get('condition', ''))
+                border_color = "#4CAF50" if color == "green" else "#F44336"
+                st.markdown(f'<div class="rule-box" style="border-left-color: {border_color}; font-size:0.8rem;"><b>{i+1}.</b> {display}</div>', unsafe_allow_html=True)
+            with c2:
+                if st.button("🗑️", key=f"{key_prefix}_del_{i}"):
+                    current_rules.pop(i)
+                    st.session_state[rules_key] = current_rules
+                    st.rerun()
+        if not current_rules:
+            st.caption("暂无规则")
     
-    if not current_rules:
-        st.caption("暂无规则")
-    
-    # 公式编辑器
-    st.markdown("---")
+    # 添加新规则（简化）
     st.markdown(f"**➕ 添加新{'买入' if color=='green' else '卖出'}规则**")
     formula = formula_editor(key_prefix, "")
     
-    if st.button(f"✅ 添加为{'买入' if color=='green' else '卖出'}规则", key=f"{key_prefix}_add_rule", type="primary", use_container_width=True):
+    if st.button(f"✅ 添加", key=f"{key_prefix}_add_rule", type="primary", use_container_width=True):
         if formula.strip():
             current_rules.append({"condition": formula.strip(), "description": formula.strip()})
             st.session_state[rules_key] = current_rules
@@ -424,56 +518,200 @@ def rule_builder(key_prefix, existing_rules, title, color="green"):
 
 
 # ============================================================
-#  排序公式构建器
+#  排序公式构建器（含惩罚项面板）
 # ============================================================
 def rank_formula_builder(key_prefix, current_formula):
-    st.markdown("**📊 排序公式**")
+    
+    # 惩罚项面板
+    penalty_key = f"{key_prefix}_penalty_enabled"
+    penalty_days_key = f"{key_prefix}_penalty_days"
+    penalty_threshold_key = f"{key_prefix}_penalty_threshold"
+    penalty_value_key = f"{key_prefix}_penalty_value"
+    
+    if penalty_key not in st.session_state:
+        st.session_state[penalty_key] = False
+    if penalty_days_key not in st.session_state:
+        st.session_state[penalty_days_key] = 3
+    if penalty_threshold_key not in st.session_state:
+        st.session_state[penalty_threshold_key] = -0.05
+    if penalty_value_key not in st.session_state:
+        st.session_state[penalty_value_key] = -300
+    
+    # 惩罚项面板（默认收起）
+    with st.expander("⚠️ 惩罚项设置（跌幅扣分）", expanded=False):
+        enable_penalty = st.checkbox("启用惩罚项", value=st.session_state[penalty_key], key=penalty_key)
+        if enable_penalty:
+            pcols = st.columns(3)
+            with pcols[0]:
+                p_days = st.number_input("检查天数", min_value=1, max_value=30, value=st.session_state[penalty_days_key], key=penalty_days_key)
+            with pcols[1]:
+                p_threshold = st.number_input("跌幅阈值", min_value=-0.5, max_value=0.0, value=st.session_state[penalty_threshold_key], step=0.01, format="%.2f", key=penalty_threshold_key)
+            with pcols[2]:
+                p_value = st.number_input("惩罚分数", min_value=-1000, max_value=0, value=st.session_state[penalty_value_key], step=10, key=penalty_value_key)
+            st.caption(f"效果：最近{p_days}日任意一天跌幅<{p_threshold:.0%}，排序扣{p_value}分")
+    
     formula = formula_editor(key_prefix, current_formula)
+    
+    # 自动追加/移除惩罚项
+    if st.session_state.get(penalty_key, False):
+        p_days = st.session_state.get(penalty_days_key, 3)
+        p_threshold = st.session_state.get(penalty_threshold_key, -0.05)
+        p_value = st.session_state.get(penalty_value_key, -300)
+        penalty_expr = f"penalty({p_days}, {p_threshold}, {p_value})"
+        if penalty_expr not in formula:
+            if formula.strip():
+                formula = f"{formula.strip()} + {penalty_expr}"
+            else:
+                formula = penalty_expr
+    else:
+        # 移除惩罚项
+        formula = re.sub(r'\s*\+\s*penalty\([^)]+\)', '', formula).strip()
+        formula = re.sub(r'penalty\([^)]+\)\s*\+\s*', '', formula).strip()
+    
     return formula
 
+# ============================================================
+#  用户自定义策略持久化
+# ============================================================
+USER_PRESETS_FILE = os.path.join(os.path.dirname(__file__), "user_presets.json")
+
+def load_user_presets():
+    """加载用户保存的自定义策略"""
+    if os.path.exists(USER_PRESETS_FILE):
+        try:
+            with open(USER_PRESETS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_user_preset(name, preset_data):
+    """保存用户自定义策略到本地文件"""
+    presets = load_user_presets()
+    presets[name] = preset_data
+    with open(USER_PRESETS_FILE, "w", encoding="utf-8") as f:
+        json.dump(presets, f, ensure_ascii=False, indent=2)
+    return True
+
+def delete_user_preset(name):
+    """删除用户自定义策略"""
+    presets = load_user_presets()
+    if name in presets:
+        del presets[name]
+        with open(USER_PRESETS_FILE, "w", encoding="utf-8") as f:
+            json.dump(presets, f, ensure_ascii=False, indent=2)
+        return True
+    return False
+
+
+def get_all_presets():
+    """合并系统预设和用户预设"""
+    user_presets = load_user_presets()
+    all_presets = dict(PRESETS)
+    for name, data in user_presets.items():
+        all_presets[f"💾 {name}"] = data
+    return all_presets
+
 
 # ============================================================
-#  标的池选择器
+#  标的池选择器（简洁版：搜索+下拉选择+已选列表+删除）
 # ============================================================
 def stock_pool_selector(key_prefix, selected_codes):
-    st.markdown("**📋 标的池选择器**")
-    df = POOL_DF.copy()
+    """简洁股票池选择器：搜索下拉选择、快捷分类、已选列表可删除"""
+    pool_key = f"{key_prefix}_selected_codes"
+    if pool_key not in st.session_state:
+        st.session_state[pool_key] = list(selected_codes)
+    current_codes = st.session_state[pool_key]
     
-    search = st.text_input("🔍 搜索（名称/代码）", "", key=f"{key_prefix}_search")
-    if search:
-        mask = df['名称'].str.contains(search, case=False, na=False) | df['代码'].str.contains(search, case=False, na=False)
-        df = df[mask]
+    # ===== 搜索添加（下拉选择） =====
+    with st.expander("🔍 搜索添加", expanded=True):
+        search = st.text_input("输入代码/名称关键词", "", key=f"{key_prefix}_search_input")
+        
+        if search:
+            terms = [s.strip() for s in search.replace("，", ",").split(",") if s.strip()]
+            matched = []
+            for term in terms:
+                mask = (POOL_DF['名称'].str.contains(term, case=False, na=False) | 
+                        POOL_DF['代码'].str.contains(term, case=False, na=False))
+                matched.extend(POOL_DF[mask].to_dict('records'))
+            
+            # 去重，排除已选
+            seen = set(current_codes)
+            unique_matched = []
+            for row in matched:
+                if row['代码'] not in seen:
+                    seen.add(row['代码'])
+                    unique_matched.append(row)
+            
+            if unique_matched:
+                options = {f"{r['代码']} | {r['名称']} | {r['分类']}": r['代码'] for r in unique_matched[:20]}
+                selected_option = st.selectbox(f"匹配到 {len(unique_matched)} 只，选择添加", 
+                                                ["-- 请选择 --"] + list(options.keys()),
+                                                key=f"{key_prefix}_select_add")
+                if selected_option != "-- 请选择 --":
+                    code_to_add = options[selected_option]
+                    st.session_state[pool_key].append(code_to_add)
+                    st.rerun()
+            else:
+                st.caption("无匹配结果或已全选")
     
-    categories = sorted(df['分类'].unique().tolist())
-    selected_cats = st.multiselect("分类筛选", categories, default=[], key=f"{key_prefix}_cats")
-    if selected_cats:
-        df = df[df['分类'].isin(selected_cats)]
-    
-    types = sorted(df['类型'].unique().tolist())
-    selected_types = st.multiselect("类型筛选", types, default=types, key=f"{key_prefix}_types")
-    if selected_types:
-        df = df[df['类型'].isin(selected_types)]
-    
-    st.caption(f"共 {len(df)} 只标的")
-    
-    df['选中'] = df['代码'].isin(selected_codes)
-    edited_df = st.data_editor(
-        df[['选中', '代码', '名称', '分类', '类型']],
-        column_config={"选中": st.column_config.CheckboxColumn("选中", default=False)},
-        hide_index=True, use_container_width=True, height=300,
-        key=f"{key_prefix}_editor"
-    )
-    
-    new_selected = edited_df[edited_df['选中'] == True]['代码'].tolist()
-    
-    if new_selected:
-        st.markdown(f"**已选 {len(new_selected)} 只：**")
-        selected_df = POOL_DF[POOL_DF['代码'].isin(new_selected)][['代码', '名称', '分类']]
-        st.dataframe(selected_df, hide_index=True, use_container_width=True)
-    else:
-        st.info("尚未选择任何标的")
-    
-    return new_selected
+    # ===== 快捷分类（直接选择子类 + 标的）=====
+    with st.expander("📂 快捷分类添加", expanded=False):
+        # 获取所有有未选标的的子类
+        all_sub_cats = sorted(set(POOL_DF['分类'].tolist()))
+        available_sub_cats = []
+        for cat in all_sub_cats:
+            count = len(POOL_DF[(POOL_DF['分类'] == cat) & (~POOL_DF['代码'].isin(current_codes))])
+            if count > 0:
+                available_sub_cats.append(f"{cat} ({count})")
+        
+        if available_sub_cats:
+            selected_sub = st.selectbox("选择分类", available_sub_cats, key=f"{key_prefix}_subcat_select")
+            active_subcat = selected_sub.split(" (")[0] if selected_sub else None
+            
+            # 该子类的标的选择（下拉框滚动选择）
+            if active_subcat:
+                cat_df = POOL_DF[(POOL_DF['分类'] == active_subcat) & (~POOL_DF['代码'].isin(current_codes))]
+                if not cat_df.empty:
+                    st.caption(f"**{active_subcat}**：共 {len(cat_df)} 只，下拉选择添加")
+                    options = {f"{r['名称']} ({r['代码']})": r['代码'] for _, r in cat_df.iterrows()}
+                    selected = st.selectbox("选择标的", ["-- 请选择 --"] + list(options.keys()), key=f"{key_prefix}_item_select")
+                    if selected != "-- 请选择 --":
+                        st.session_state[pool_key].append(options[selected])
+                        st.rerun()
+                else:
+                    st.caption(f"{active_subcat} 已全部选中")
+        else:
+            st.caption("无可添加标的")
+
+    # ===== 已选列表（折叠）=====
+    with st.expander(f"📋 已选 {len(current_codes)} 只", expanded=False):
+        if current_codes:
+            selected_df = POOL_DF[POOL_DF['代码'].isin(current_codes)][['代码', '名称', '分类']].copy()
+            order_map = {code: i for i, code in enumerate(current_codes)}
+            selected_df['order'] = selected_df['代码'].map(order_map)
+            selected_df = selected_df.sort_values('order').drop('order', axis=1)
+            
+            for idx, row in selected_df.iterrows():
+                c1, c2, c3, c4 = st.columns([2, 3, 2, 1])
+                with c1:
+                    st.text(row['代码'])
+                with c2:
+                    st.text(row['名称'])
+                with c3:
+                    st.text(row['分类'])
+                with c4:
+                    if st.button("🗑️", key=f"{key_prefix}_del_{row['代码']}", help="删除"):
+                        st.session_state[pool_key].remove(row['代码'])
+                        st.rerun()
+            
+            if st.button("🗑️ 清空全部", key=f"{key_prefix}_clear_all"):
+                st.session_state[pool_key] = []
+                st.rerun()
+        else:
+            st.caption("尚未选择任何标的")
+
+    return st.session_state[pool_key]
 
 
 # ============================================================
@@ -483,11 +721,8 @@ def main():
     st.markdown('<div class="main-header">📊 轮动策略回测系统</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">1912只ETF+LOF · 可视化策略构建 · 自定义排序指标 · 自定义买卖规则</div>', unsafe_allow_html=True)
     
-    # 数据源状态提示
-    if LOCAL_PKL_DIR:
-        st.success(f"✅ 本地数据已连接：{LOCAL_PKL_DIR}")
-    else:
-        st.info("ℹ️ 未检测到本地pkl数据，将使用在线数据源（AKShare/Westock）")
+    # 数据源状态提示（移到侧边栏底部）
+    data_source_info = f"✅ 本地数据：{LOCAL_PKL_DIR}" if LOCAL_PKL_DIR else "ℹ️ 在线数据源（AKShare/Westock）"
     
     if 'results' not in st.session_state: st.session_state.results = None
     if 'config' not in st.session_state: st.session_state.config = None
@@ -496,10 +731,12 @@ def main():
     with st.sidebar:
         st.header("⚙️ 策略配置")
 
-        preset = st.selectbox("选择预设策略", list(PRESETS.keys()), key="preset_select")
-        preset_data = PRESETS[preset] if preset != "🎯 自定义策略" else {}
+        all_presets = get_all_presets()
+        preset = st.selectbox("选择预设策略", list(all_presets.keys()), key="preset_select")
+        preset_data = all_presets[preset] if preset != "🎯 自定义策略" else {}
+        is_user_preset = preset.startswith("💾 ")
 
-        # 预设切换时清理session_state
+        # 预设切换时清理 session_state
         if "last_preset" not in st.session_state:
             st.session_state.last_preset = preset
         if preset != st.session_state.last_preset:
@@ -508,10 +745,8 @@ def main():
                 if k.startswith(("buy_", "sell_", "rank_", "pool_")):
                     del st.session_state[k]
 
-        strategy_name = st.text_input("策略名称", value=preset_data.get("strategy_name", "我的轮动策略"), key="strategy_name")
-
-        st.divider()
-        st.subheader("📋 股票池")
+        st.markdown("---")
+        st.markdown("**📋 股票池**")
         init_codes = preset_data.get("selected_codes", [])
         selected_codes = stock_pool_selector("pool", init_codes)
 
@@ -521,47 +756,92 @@ def main():
             if not row.empty:
                 universe.append({"code": code, "name": row.iloc[0]['名称']})
 
-        st.divider()
-        st.subheader("📊 排序公式")
+        st.markdown("---")
+        st.markdown("**📊 排序公式**")
         rank_formula = rank_formula_builder("rank", preset_data.get("rank_formula", "returns(20)"))
         rank_direction = st.radio("排名方向", ["desc", "asc"], index=0 if preset_data.get("rank_direction", "desc") == "desc" else 1,
                                    format_func=lambda x: "分数越大越好" if x == "desc" else "分数越小越好", key="rank_dir")
 
-        st.divider()
-        st.subheader("💰 持仓")
-        max_count = st.number_input("最多持有", min_value=1, max_value=20, value=preset_data.get("max_count", 5), key="max_count")
-        position_mode = st.radio("模式", ["fixed", "adaptive"], index=0, format_func=lambda x: "固定均分" if x == "fixed" else "动态均分", key="pos_mode")
-
-        st.divider()
-        st.subheader("🟢 买入规则")
-        buy_rules = rule_builder("buy", preset_data.get("buy_rules", []), "🟢 买入规则", "green")
-
-        st.divider()
-        st.subheader("🔴 卖出规则")
-        sell_rules = rule_builder("sell", preset_data.get("sell_rules", []), "🔴 卖出规则", "red")
-
-        st.divider()
-        st.subheader("🔄 轮动")
+        st.markdown("---")
+        st.markdown("**💰 持仓与轮动**")
+        c1, c2 = st.columns(2)
+        with c1:
+            max_count = st.number_input("最多持有", min_value=1, max_value=20, value=preset_data.get("max_count", 5), key="max_count")
+        with c2:
+            position_mode = st.radio("模式", ["fixed", "adaptive"], index=0, format_func=lambda x: "固定均分" if x == "fixed" else "动态", key="pos_mode")
         rebalance_interval = st.number_input("轮动周期（每N个交易日）", min_value=1, max_value=60, value=preset_data.get("rebalance_interval", 2), key="rebal_int")
         rebalance_freq = "interval"
 
-        st.divider()
-        st.subheader("📅 回测")
-        start_date = st.date_input("开始", value=datetime.datetime.strptime(preset_data.get("start_date", "2020-01-01"), "%Y-%m-%d"), key="start_d")
-        end_date = st.date_input("结束", value=datetime.datetime.now(), key="end_d")
-        initial_capital = st.number_input("初始资金", min_value=10000, value=preset_data.get("initial_capital", 100000), step=10000, key="init_cap")
-        commission = st.number_input("手续费", min_value=0.0, max_value=0.01, value=0.0001, format="%.4f", key="comm")
-        slippage = st.number_input("滑点", min_value=0.0, max_value=0.05, value=0.001, format="%.3f", key="slip")
-        benchmark = st.text_input("基准", value=preset_data.get("benchmark", "sh510300"), key="bench")
+        st.markdown("---")
+        st.markdown("**🟢 买入规则**")
+        buy_rules = rule_builder("buy", preset_data.get("buy_rules", []), "🟢 买入规则", "green")
+
+        st.markdown("---")
+        st.markdown("**🔴 卖出规则**")
+        sell_rules = rule_builder("sell", preset_data.get("sell_rules", []), "🔴 卖出规则", "red")
+
+        st.markdown("---")
+        with st.expander("📅 回测参数", expanded=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                start_date = st.date_input("开始", value=datetime.datetime.strptime(preset_data.get("start_date", "2020-01-01"), "%Y-%m-%d"), key="start_d")
+            with c2:
+                end_date = st.date_input("结束", value=datetime.datetime.now(), key="end_d")
+            initial_capital = st.number_input("初始资金", min_value=10000, value=preset_data.get("initial_capital", 100000), step=10000, key="init_cap")
+            benchmark = st.text_input("基准", value=preset_data.get("benchmark", "sh510300"), key="bench")
+            alternative_asset = st.text_input("替代资产（闲置资金配置）", value=preset_data.get("alternative_asset", "sh511880"), key="alt_asset",
+                                              help="例如：sh511880（银华日利）")
+
+        with st.expander("⚙️ 高级参数"):
+            commission = st.number_input("手续费", min_value=0.0, max_value=0.01, value=0.0001, format="%.4f", key="comm")
+            slippage = st.number_input("滑点", min_value=0.0, max_value=0.05, value=0.0, format="%.3f", key="slip")
         
-        st.markdown("**替代资产（闲置资金配置）**")
-        alternative_asset = st.text_input("代码", value=preset_data.get("alternative_asset", "sh511880"), key="alt_asset",
-                                          help="例如：sh511880（银华日利）")
+        # ===== 自定义策略保存 =====
+        st.markdown("---")
+        with st.expander("💾 保存/删除自定义策略"):
+            save_name = st.text_input("策略名称", value="", key="save_preset_name", placeholder="输入名称后点击保存")
+            if st.button("💾 保存当前策略", key="btn_save_preset"):
+                if save_name.strip():
+                    preset_to_save = {
+                        "selected_codes": selected_codes,
+                        "rank_formula": rank_formula,
+                        "rank_direction": rank_direction,
+                        "max_count": max_count,
+                        "position_mode": position_mode,
+                        "buy_match_mode": "all",
+                        "buy_rules": buy_rules,
+                        "sell_match_mode": "any",
+                        "sell_rules": sell_rules,
+                        "rebalance_freq": rebalance_freq,
+                        "rebalance_interval": rebalance_interval,
+                        "start_date": start_date.strftime("%Y-%m-%d"),
+                        "initial_capital": initial_capital,
+                        "benchmark": benchmark,
+                        "alternative_asset": alternative_asset,
+                    }
+                    if save_user_preset(save_name.strip(), preset_to_save):
+                        st.success(f"✅ 策略 '{save_name}' 已保存！刷新页面后可在下拉框中选择。")
+                    else:
+                        st.error("保存失败")
+                else:
+                    st.warning("请输入策略名称")
+            
+            # 删除已保存的自定义策略
+            if is_user_preset:
+                preset_name = preset[2:]  # 去掉 "💾 " 前缀
+                if st.button("🗑️ 删除当前策略", key="btn_delete_preset"):
+                    if delete_user_preset(preset_name):
+                        st.success(f"✅ 策略 '{preset_name}' 已删除！")
+                        st.rerun()
+                    else:
+                        st.error("删除失败")
+        
+        st.markdown("---")
+        st.caption(data_source_info)
 
     # ---------- 主页面 ----------
-    col_btn1, col_btn2 = st.columns([6, 1])
-    with col_btn2:
-        run_btn = st.button("🚀 运行回测", type="primary", use_container_width=True)
+    st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
+    run_btn = st.button("🚀 运行回测", type="primary", use_container_width=True)
 
     if run_btn:
         if not universe:
@@ -579,7 +859,7 @@ def main():
             progress_bar.progress(10)
 
             form_data = {
-                "strategy_name": strategy_name, "universe": universe,
+                "strategy_name": preset, "universe": universe,
                 "rank_formula": rank_formula, "rank_direction": rank_direction,
                 "max_count": max_count, "position_mode": position_mode,
                 "buy_match_mode": "all", "buy_rules": buy_rules,
@@ -611,7 +891,6 @@ def main():
             progress_bar.progress(100)
             status_text.text("✅ 回测完成！")
             st.session_state.results = results
-            st.success("✅ 回测完成！")
 
         except Exception as e:
             progress_bar.empty()
@@ -662,55 +941,152 @@ def show_results(results):
         with cols[i]:
             st.markdown(f'<div class="metric-card" style="background:{color};"><div class="metric-value">{value}</div><div class="metric-label">{label}</div></div>', unsafe_allow_html=True)
 
-    # ========== 净值曲线 ==========
-    st.divider()
-    st.subheader("📉 净值曲线")
-    if 'daily_values' in results and results['daily_values'] is not None and not results['daily_values'].empty:
-        df = results['daily_values']
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
-        fig.add_trace(go.Scatter(x=df.index, y=df['nav'], name='策略净值', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
-        fig.add_hline(y=1.0, line_dash="dash", line_color="gray", row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['drawdown']*100, name='回撤%', fill='tozeroy', fillcolor='rgba(255,0,0,0.2)', line=dict(color='red', width=0.5)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['num_positions'], name='持仓数', line=dict(color='green', width=1)), row=3, col=1)
-        fig.update_layout(height=650, showlegend=True, hovermode='x unified')
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("暂无净值数据")
+    # 净值曲线
+    with st.container():
+        if 'daily_values' in results and results['daily_values'] is not None and not results['daily_values'].empty:
+            df = results['daily_values']
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.55, 0.25, 0.2])
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['nav'], name='策略净值',
+                line=dict(color='#2196F3', width=1.5),
+                hovertemplate='%{x|%Y-%m-%d}<br>策略净值: %{y:.4f}<extra></extra>'
+            ), row=1, col=1)
+            fig.add_hline(y=1.0, line_dash="dash", line_color="gray", row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['drawdown']*100, name='回撤%',
+                fill='tozeroy', fillcolor='rgba(220,20,60,0.6)',
+                line=dict(color='crimson', width=1.2),
+                hovertemplate='%{x|%Y-%m-%d}<br>回撤: %{y:.2f}%<extra></extra>'
+            ), row=2, col=1)
+            fig.update_yaxes(zeroline=False, row=2, col=1)
+            fig.update_yaxes(zeroline=False, row=3, col=1)
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['num_positions'], name='持仓数',
+                line=dict(color='green', width=1),
+                hovertemplate='%{x|%Y-%m-%d}<br>持仓数: %{y}<extra></extra>'
+            ), row=3, col=1)
+            fig.update_layout(
+                height=600, showlegend=True, hovermode='x unified',
+                xaxis=dict(
+                    tickformat='%Y-%m-%d', type='date', nticks=20, showgrid=True,
+                    rangeslider=dict(visible=True, thickness=0.08),
+                    rangeselector=dict(
+                        buttons=list([
+                            dict(count=1, label='1月', step='month', stepmode='backward'),
+                            dict(count=6, label='6月', step='month', stepmode='backward'),
+                            dict(count=1, label='1年', step='year', stepmode='backward'),
+                            dict(count=2, label='2年', step='year', stepmode='backward'),
+                            dict(step='all', label='全部')
+                        ])
+                    )
+                ),
+                xaxis2=dict(tickformat='%Y-%m-%d', type='date', nticks=20, showgrid=True),
+                xaxis3=dict(tickformat='%Y-%m-%d', type='date', nticks=20, showgrid=True),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("暂无净值数据")
 
-    # ========== 交易日志 ==========
-    st.divider()
-    st.subheader("📝 交易日志")
-    if 'trade_log' in results and results['trade_log'] is not None and not results['trade_log'].empty:
-        trades = results['trade_log']
-        st.dataframe(trades, use_container_width=True, hide_index=True)
-        csv = trades.to_csv(index=False).encode('utf-8')
-        st.download_button("⬇️ 下载交易日志", csv, "trades.csv", "text/csv")
-    else:
-        st.info("暂无交易记录")
+    # 交易日志（折叠）
+    with st.expander("📝 交易日志"):
+        if 'trade_log' in results and results['trade_log'] is not None and not results['trade_log'].empty:
+            trades = results['trade_log']
+            st.dataframe(trades, use_container_width=True, hide_index=True)
+            csv = trades.to_csv(index=False).encode('utf-8')
+            st.download_button("⬇️ 下载交易日志", csv, "trades.csv", "text/csv")
+        else:
+            st.info("暂无交易记录")
+
+    # 调仓计划（折叠）
+    with st.expander("📋 调仓计划"):
+        if 'rebalance_plans' in results and results['rebalance_plans'] is not None and not results['rebalance_plans'].empty:
+            plan_df = results['rebalance_plans'].copy()
+            # 按日期倒序，显示最新的调仓
+            plan_df['date'] = pd.to_datetime(plan_df['date'])
+            plan_df = plan_df.sort_values('date', ascending=False)
+            buy_plans = plan_df[plan_df['plan_type'] == 'BUY_PLAN']
+            sell_plans = plan_df[plan_df['plan_type'] == 'SELL_PLAN']
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**🟢 最新计划买入**")
+                if not buy_plans.empty:
+                    buy_display = buy_plans[['date', 'code', 'name', 'detail']].head(20)
+                    buy_display.columns = ['日期', '代码', '名称', '详情']
+                    st.dataframe(buy_display, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("无买入计划")
+            with c2:
+                st.markdown("**🔴 最新计划卖出**")
+                if not sell_plans.empty:
+                    sell_display = sell_plans[['date', 'code', 'name', 'detail', 'profit_pct', 'hold_days']].head(20)
+                    sell_display['profit_pct'] = (sell_display['profit_pct'] * 100).round(2).astype(str) + '%'
+                    sell_display.columns = ['日期', '代码', '名称', '卖出原因', '收益率', '持仓天数']
+                    st.dataframe(sell_display, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("无卖出计划")
+
+            csv_plan = plan_df.to_csv(index=False).encode('utf-8')
+            st.download_button("⬇️ 下载调仓计划", csv_plan, "rebalance_plans.csv", "text/csv")
+        else:
+            st.info("暂无调仓计划数据")
+
+    # QMT 实盘代码生成
+    with st.expander("🖥️ QMT 实盘代码生成"):
+        qmt_account = st.text_input("QMT 资金账号", value="520000249836", key="qmt_account")
+        qmt_capital = st.number_input("实盘资金（元）", value=100000.0, step=10000.0, key="qmt_capital")
+        qmt_script_dir = st.text_input("交易计划 CSV 保存目录", value=r"C:\QMT\trade_plan", key="qmt_script_dir")
+        qmt_run_mode = st.selectbox("运行模式", ["live", "paper"], format_func=lambda x: "实盘" if x == "live" else "模拟", key="qmt_run_mode")
+        
+        strategy_name = st.session_state.get('selected_preset', 'custom_strategy')
+        if st.button("🚀 生成 QMT 实盘代码", key="btn_gen_qmt"):
+            with st.spinner("正在生成 QMT 实盘代码..."):
+                try:
+                    qmt_config = qmt_adapter.build_qmt_config(st.session_state.config)
+                    import tempfile
+                    fd, temp_path = tempfile.mkstemp(suffix=".py", prefix="qmt_strategy_")
+                    os.close(fd)
+                    qmt_generator.generate_qmt_file(
+                        config=qmt_config,
+                        output_path=temp_path,
+                        strategy_name=strategy_name,
+                        account_id=qmt_account,
+                        real_capital=qmt_capital,
+                        script_dir=qmt_script_dir,
+                        run_mode=qmt_run_mode,
+                    )
+                    with open(temp_path, "r", encoding="utf-8") as f:
+                        qmt_code = f.read()
+                    os.unlink(temp_path)
+                    st.download_button(
+                        label="⬇️ 下载 QMT 策略文件 (.py)",
+                        data=qmt_code.encode("utf-8"),
+                        file_name=f"qmt_strategy_{strategy_name}.py",
+                        mime="text/x-python",
+                        key="btn_download_qmt",
+                    )
+                    st.success("QMT 实盘代码生成成功！")
+                    with st.expander("📄 预览代码（前100行）"):
+                        st.code("\n".join(qmt_code.splitlines()[:100]), language="python")
+                except Exception as e:
+                    st.error(f"生成 QMT 代码失败: {e}")
+                    st.exception(e)
 
 
 def show_guide():
-    st.info("👈 请在左侧配置策略参数，点击 **运行回测** 开始")
+    st.info("👈 在左侧配置策略参数，点击 **运行回测** 开始")
     with st.expander("📖 使用指南"):
         st.markdown("""
         **快速上手**：选择预设策略 → 调整参数 → 运行回测 → 查看结果
         
         **数据源**：本地pkl优先，无本地则AKShare/Westock自动降级
         
-        **系统指标**：MA/EMA/RSI/MACD/ATR/BOLL/KDJ/returns/quality_score/RSRS等
-        
-        **排序公式**：点击下方按钮自由组装，或直接输入
-        
-        **买卖规则**：点击按钮组装条件表达式，支持任意组合
-        
-        **标的池**：1912只ETF+LOF，支持搜索、分类筛选、多选
+        **T+1模式**：收盘信号，次日开盘成交
         """)
     with st.expander("⚠️ 注意事项"):
         st.markdown("""
         - 指标需约60日预热，回测开始日期会自动对齐
-        - T+1模式：收盘信号，次日开盘成交
         - 首次回测需下载数据，可能较慢
-        - 部分品种可能获取不到数据，将自动跳过
         - 回测结果仅供参考，不构成投资建议
         """)
 

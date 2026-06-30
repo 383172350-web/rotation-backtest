@@ -65,7 +65,7 @@ CONFIG = {
             'start_date': '2020-01-01',
             'initial_capital': 100000,
             'commission': 0.0001,
-            'slippage': 0.001,
+            'slippage': 0,
         },
     }
 }
