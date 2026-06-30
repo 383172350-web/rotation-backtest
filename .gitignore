@@ -3,9 +3,7 @@ __pycache__/
 *.pyo
 *.log
 .env
-data/ETF/1d/
 user_presets.json
-*.pkl
 streamlit.pid
 streamlit.port
 streamlit.log
