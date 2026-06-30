@@ -404,14 +404,14 @@ def formula_editor(key_prefix, preset_formula=""):
     # 选择元素插入
     st.markdown("**选择元素插入到公式**")
     
-    # 分类选择
+    # 分类选择（系统指标最上，运算符最下）
     categories = {
-        "运算符": ["+", "-", "*", "/", ">", "<", ">=", "<=", "==", "!=", "AND", "OR", "(", ")"],
         "基础字段": ["close", "open", "high", "low", "volume", "amount"],
         "特殊变量": ["rank", "profit", "hold_days", "buy_price"],
+        "运算符": ["+", "-", "*", "/", ">", "<", ">=", "<=", "==", "!=", "AND", "OR", "(", ")"],
     }
     
-    cat = st.selectbox("选择分类", list(categories.keys()) + ["系统指标"],
+    cat = st.selectbox("选择分类", ["系统指标"] + list(categories.keys()),
                        key=f"{key_prefix}_cat_select")
     
     if cat in categories:
@@ -485,8 +485,8 @@ def rule_builder(key_prefix, existing_rules, title, color="green"):
     
     current_rules = st.session_state[rules_key]
     
-    # 已有规则（折叠）
-    with st.expander(f"📋 已有 {len(current_rules)} 条规则", expanded=False):
+    # 已有规则（展开）
+    with st.expander(f"📋 已有 {len(current_rules)} 条规则", expanded=True):
         for i, rule in enumerate(current_rules):
             c1, c2 = st.columns([8, 1])
             with c1:
@@ -745,6 +745,45 @@ def main():
                 if k.startswith(("buy_", "sell_", "rank_", "pool_")):
                     del st.session_state[k]
 
+        # ===== 自定义策略保存（移到最上面）=====
+        with st.expander("💾 保存/删除自定义策略"):
+            save_name = st.text_input("策略名称", value="", key="save_preset_name", placeholder="输入名称后点击保存")
+            if st.button("💾 保存当前策略", key="btn_save_preset"):
+                if save_name.strip():
+                    preset_to_save = {
+                        "selected_codes": selected_codes,
+                        "rank_formula": rank_formula,
+                        "rank_direction": rank_direction,
+                        "max_count": max_count,
+                        "position_mode": position_mode,
+                        "buy_match_mode": "all",
+                        "buy_rules": buy_rules,
+                        "sell_match_mode": "any",
+                        "sell_rules": sell_rules,
+                        "rebalance_freq": rebalance_freq,
+                        "rebalance_interval": rebalance_interval,
+                        "start_date": start_date.strftime("%Y-%m-%d"),
+                        "initial_capital": initial_capital,
+                        "benchmark": benchmark,
+                        "alternative_asset": alternative_asset,
+                    }
+                    if save_user_preset(save_name.strip(), preset_to_save):
+                        st.success(f"✅ 策略 '{save_name}' 已保存！刷新页面后可在下拉框中选择。")
+                    else:
+                        st.error("保存失败")
+                else:
+                    st.warning("请输入策略名称")
+            
+            # 删除已保存的自定义策略
+            if is_user_preset:
+                preset_name = preset[2:]  # 去掉 "💾 " 前缀
+                if st.button("🗑️ 删除当前策略", key="btn_delete_preset"):
+                    if delete_user_preset(preset_name):
+                        st.success(f"✅ 策略 '{preset_name}' 已删除！")
+                        st.rerun()
+                    else:
+                        st.error("删除失败")
+        
         st.markdown("---")
         st.markdown("**📋 股票池**")
         init_codes = preset_data.get("selected_codes", [])
@@ -795,46 +834,6 @@ def main():
         with st.expander("⚙️ 高级参数"):
             commission = st.number_input("手续费", min_value=0.0, max_value=0.01, value=0.0001, format="%.4f", key="comm")
             slippage = st.number_input("滑点", min_value=0.0, max_value=0.05, value=0.0, format="%.3f", key="slip")
-        
-        # ===== 自定义策略保存 =====
-        st.markdown("---")
-        with st.expander("💾 保存/删除自定义策略"):
-            save_name = st.text_input("策略名称", value="", key="save_preset_name", placeholder="输入名称后点击保存")
-            if st.button("💾 保存当前策略", key="btn_save_preset"):
-                if save_name.strip():
-                    preset_to_save = {
-                        "selected_codes": selected_codes,
-                        "rank_formula": rank_formula,
-                        "rank_direction": rank_direction,
-                        "max_count": max_count,
-                        "position_mode": position_mode,
-                        "buy_match_mode": "all",
-                        "buy_rules": buy_rules,
-                        "sell_match_mode": "any",
-                        "sell_rules": sell_rules,
-                        "rebalance_freq": rebalance_freq,
-                        "rebalance_interval": rebalance_interval,
-                        "start_date": start_date.strftime("%Y-%m-%d"),
-                        "initial_capital": initial_capital,
-                        "benchmark": benchmark,
-                        "alternative_asset": alternative_asset,
-                    }
-                    if save_user_preset(save_name.strip(), preset_to_save):
-                        st.success(f"✅ 策略 '{save_name}' 已保存！刷新页面后可在下拉框中选择。")
-                    else:
-                        st.error("保存失败")
-                else:
-                    st.warning("请输入策略名称")
-            
-            # 删除已保存的自定义策略
-            if is_user_preset:
-                preset_name = preset[2:]  # 去掉 "💾 " 前缀
-                if st.button("🗑️ 删除当前策略", key="btn_delete_preset"):
-                    if delete_user_preset(preset_name):
-                        st.success(f"✅ 策略 '{preset_name}' 已删除！")
-                        st.rerun()
-                    else:
-                        st.error("删除失败")
         
         st.markdown("---")
         st.caption(data_source_info)
