@@ -2,5 +2,3 @@ streamlit
 numpy
 pandas
 plotly
-lxml
-akshare>=1.11.0
