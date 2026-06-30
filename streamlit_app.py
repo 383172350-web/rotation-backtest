@@ -17,6 +17,12 @@ import sys
 import os
 import traceback
 
+# Optional: akshare may fail in some environments
+try:
+    import akshare as _ak
+except ImportError:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import BacktestEngine
 from data_fetcher import fetch_kline, batch_fetch_klines, LOCAL_PKL_DIR, _is_trading_time
