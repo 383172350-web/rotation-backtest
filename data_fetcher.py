@@ -192,15 +192,22 @@ def fetch_kline(code: str, start_date: str, end_date: str,
                     local_row = df_local[df_local['date'] == local_last_date]
                     
                     if not verify_row.empty and not local_row.empty:
-                        local_close = float(local_row['close'].iloc[0])
-                        verify_close = float(verify_row['close'].iloc[0])
+                        # 核对4个价格：open, high, low, close
+                        prices_match = True
+                        for price_col in ['open', 'high', 'low', 'close']:
+                            local_price = float(local_row[price_col].iloc[0])
+                            verify_price = float(verify_row[price_col].iloc[0])
+                            if abs(local_price - verify_price) >= 1e-6:
+                                prices_match = False
+                                print(f"[数据核对] {code}: {price_col}不一致 本地={local_price} 在线={verify_price}")
+                                break
                         
-                        if abs(local_close - verify_close) < 1e-6:
-                            # 收盘价一致，返回本地数据
+                        if prices_match:
+                            # 4个价格都一致，返回本地数据
                             return df_local
                         else:
-                            # 收盘价不一致，强制更新完整数据
-                            print(f"[数据核对] {code}: close不一致 本地={local_close} 在线={verify_close}，强制更新")
+                            # 价格不一致，强制更新完整数据
+                            print(f"[数据核对] {code}: 价格不一致，强制更新")
                             df_full = _fetch_findb(code, start_date, end_date)
                             if not df_full.empty:
                                 if auto_save:
