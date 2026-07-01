@@ -384,11 +384,11 @@ def _fetch_findb(code: str, start_date: str, end_date: str,
     if not pure_code:
         return pd.DataFrame()
     
-    # 计算天数
+    # 计算天数，根据日期范围动态计算limit（交易日约占自然日的70%，加50%缓冲）
     start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
     days = (end_dt - start_dt).days + 1
-    limit = max(days, 3000)  # 至少3000条，确保覆盖历史到近期
+    limit = max(int(days * 1.5), 100)  # 至少100条，避免太少
     
     url = f"https://api.jiucaicat.icu:8443/api/bars?code={pure_code}.{suffix}&freq=daily&limit={limit}&order=desc"
     headers = {"Authorization": f"Bearer {TOKEN}"}
