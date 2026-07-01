@@ -142,39 +142,39 @@ def fetch_kline(code: str, start_date: str, end_date: str,
     """
     today = pd.to_datetime(datetime.datetime.now().strftime('%Y-%m-%d'))
     
-    # ========== 交易时间：优先本地pkl，只补充当天缺失数据 ==========
+    # ========== 交易时间：始终在线下载最新数据，覆盖本地当天数据 ==========
     if _is_trading_time():
-        # 1. 先读本地pkl
+        # 1. 先读本地pkl（历史数据）
         df_local = _fetch_local_pkl(code, start_date, end_date)
-        if not df_local.empty:
-            last_date = df_local['date'].iloc[-1]
-            today_str = today.strftime('%Y-%m-%d')
-            
-            # 如果本地已包含今天数据，直接返回本地（避免盘中重复下载）
-            if last_date >= today_str:
-                print(f"[盘中本地] {code}: 本地已包含今天数据({last_date})，直接返回")
-                return df_local
-            
-            # 本地缺少今天数据，只下载最近10条补充（快速）
-            print(f"[盘中补充] {code}: 本地最新={last_date}，下载最近10条补充...")
-            try:
-                df_new = _fetch_findb(code, start_date, end_date, limit=10)
-                if not df_new.empty and df_new['date'].iloc[-1] > last_date:
-                    # 合并到本地并保存
-                    if auto_save:
-                        _save_to_pkl(code, df_new)
-                    # 重新读取本地（合并后）
-                    df_local = _fetch_local_pkl(code, start_date, end_date)
-                    return df_local
-                else:
-                    print(f"[盘中补充] {code}: 无新数据，返回本地")
-                    return df_local
-            except Exception as e:
-                print(f"[盘中补充失败] {code}: {e}，返回本地")
-                return df_local
         
-        # 本地无数据，全量下载
-        print(f"[盘中全量] {code}: 本地无数据，全量下载...")
+        # 2. 在线下载最新1条（覆盖当天，盘中价格实时变化）
+        try:
+            df_new = _fetch_findb(code, start_date, end_date, limit=1)
+            if not df_new.empty:
+                new_date = df_new['date'].iloc[-1]
+                
+                # 如果本地有当天数据，用新数据覆盖当天；没有则追加
+                if not df_local.empty and new_date in df_local['date'].values:
+                    # 覆盖当天数据
+                    df_local = df_local[df_local['date'] != new_date]
+                    df_local = pd.concat([df_local, df_new]).sort_values('date').reset_index(drop=True)
+                    print(f"[盘中覆盖] {code}: {new_date} 数据已更新，覆盖保存")
+                else:
+                    # 追加新数据
+                    df_local = pd.concat([df_local, df_new]).sort_values('date').reset_index(drop=True)
+                    print(f"[盘中追加] {code}: {new_date} 新数据已追加")
+                
+                # 保存到本地pkl
+                if auto_save:
+                    _save_to_pkl(code, df_local)
+                
+                return df_local
+            else:
+                print(f"[盘中下载失败] {code}: 无在线数据，返回本地")
+                return df_local if not df_local.empty else pd.DataFrame()
+        except Exception as e:
+            print(f"[盘中在线失败] {code}: {e}，返回本地")
+            return df_local if not df_local.empty else pd.DataFrame()
     
     # ========== 非交易时间：优先本地pkl，核对收盘价 ==========
     # 1. 尝试本地pkl
