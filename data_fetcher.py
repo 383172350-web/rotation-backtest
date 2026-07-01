@@ -153,6 +153,15 @@ def fetch_kline(code: str, start_date: str, end_date: str,
         except Exception:
             pass
         
+        try:
+            df = _fetch_findb(code, start_date, end_date, period, fq)
+            if not df.empty:
+                if auto_save:
+                    _save_to_pkl(code, df)
+                return df
+        except Exception:
+            pass
+        
         return pd.DataFrame()
     
     # ========== 非交易时间：优先本地pkl，核对收盘价 ==========
@@ -211,6 +220,16 @@ def fetch_kline(code: str, start_date: str, end_date: str,
     # 3. 尝试Westock
     try:
         df = _fetch_westock(code, start_date, end_date, period, fq)
+        if not df.empty:
+            if auto_save:
+                _save_to_pkl(code, df)
+            return df
+    except Exception:
+        pass
+    
+    # 4. 尝试 findb API
+    try:
+        df = _fetch_findb(code, start_date, end_date, period, fq)
         if not df.empty:
             if auto_save:
                 _save_to_pkl(code, df)
@@ -294,6 +313,9 @@ def _fetch_local_pkl(code: str, start_date: str, end_date: str) -> pd.DataFrame:
 def _fetch_akshare(code: str, start_date: str, end_date: str,
                    period: str = "day", fq: str = "qfq") -> pd.DataFrame:
     """使用AKShare获取ETF K线数据（东方财富数据源）"""
+    # numpy 2.0+ 禁用 akshare（akshare 未适配 numpy 2.0）
+    if np.__version__.startswith('2.'):
+        return pd.DataFrame()
     try:
         import akshare as ak
     except ImportError:
@@ -348,6 +370,63 @@ def _fetch_westock(code: str, start_date: str, end_date: str,
         df['date'] = df['date'].dt.strftime('%Y-%m-%d')
         return df.sort_values('date').reset_index(drop=True)
     except Exception:
+        return pd.DataFrame()
+
+
+# ========== findb API ==========
+def _fetch_findb(code: str, start_date: str, end_date: str,
+                 period: str = "day", fq: str = "qfq") -> pd.DataFrame:
+    """使用 findb API 获取数据"""
+    import requests
+    TOKEN = "sk_live_7orj6tBMMNiB.4eAcaTYc65icYsacCZksDfkHqvVvQyKfdbPf0X8aiR0"
+    
+    pure_code, suffix = _extract_code_suffix(code)
+    if not pure_code:
+        return pd.DataFrame()
+    
+    # 计算天数
+    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+    days = (end_dt - start_dt).days + 1
+    limit = max(days, 3000)  # 至少3000条，确保覆盖历史到近期
+    
+    url = f"https://api.jiucaicat.icu:8443/api/bars?code={pure_code}.{suffix}&freq=daily&limit={limit}&order=desc"
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=60)
+        data = resp.json()
+        
+        # findb 返回格式: {"data": [{"datetime": "...", "open": ..., ...}]}
+        records = data.get("data", []) if isinstance(data, dict) else data
+        if not records or not isinstance(records, list):
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(records)
+        df.columns = [c.lower() for c in df.columns]
+        
+        # 重命名列
+        df = df.rename(columns={
+            'datetime': 'date',
+            'time': 'date',
+        })
+        
+        # 确保标准列名
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col not in df.columns:
+                return pd.DataFrame()
+        
+        # 处理日期
+        df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+        
+        df = df[['date', 'open', 'high', 'low', 'close', 'volume']].sort_values('date').reset_index(drop=True)
+        df['amount'] = df['volume'] * df['close']
+        
+        # 按日期范围筛选
+        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+        return df
+    except Exception as e:
+        print(f"findb error: {e}")
         return pd.DataFrame()
 
 

@@ -17,9 +17,10 @@ import sys
 import os
 import traceback
 
-# Optional: akshare may fail in some environments
+# Optional: akshare may fail in numpy 2.0+
 try:
-    import akshare as _ak
+    if not np.__version__.startswith('2.'):
+        import akshare as _ak
 except ImportError:
     pass
 
