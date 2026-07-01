@@ -103,10 +103,14 @@ def _save_to_pkl(code: str, df: pd.DataFrame, save_dir: str = None):
 
 
 def _is_trading_time():
-    """判断当前是否在交易时间（9:30-15:00）"""
+    """判断当前是否在交易时间（上午9:30-11:30，下午13:00-15:00）"""
     now = datetime.datetime.now()
     t = now.time()
-    return datetime.time(9, 30) <= t <= datetime.time(15, 0)
+    # 上午交易时间
+    morning = datetime.time(9, 30) <= t <= datetime.time(11, 30)
+    # 下午交易时间
+    afternoon = datetime.time(13, 0) <= t <= datetime.time(15, 0)
+    return morning or afternoon
 
 
 def fetch_kline(code: str, start_date: str, end_date: str,
