@@ -182,11 +182,9 @@ def fetch_kline(code: str, start_date: str, end_date: str,
         if last_date < end_dt - pd.Timedelta(days=2) and last_date < today - pd.Timedelta(days=2):
             print(f"[本地过期] {code}: 本地最新={last_date.date()}, 需要补充到={end_date}")
         else:
-            # 本地数据日期够新，需要核对收盘价是否一致
-            # 下载最近10天数据做对比（减少下载量）
-            verify_start = (today - pd.Timedelta(days=10)).strftime('%Y-%m-%d')
+            # 本地数据日期够新，核对收盘价是否一致（只下载最新1条，最快）
             try:
-                df_verify = _fetch_findb(code, verify_start, end_date, limit=10)
+                df_verify = _fetch_findb(code, start_date, end_date, limit=1)
                 if not df_verify.empty:
                     # 找到本地和在线的最新共同交易日
                     local_last_date = df_local['date'].iloc[-1]
