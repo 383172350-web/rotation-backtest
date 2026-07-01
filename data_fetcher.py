@@ -137,36 +137,39 @@ def fetch_kline(code: str, start_date: str, end_date: str,
     """
     today = pd.to_datetime(datetime.datetime.now().strftime('%Y-%m-%d'))
     
-    # ========== 交易时间：始终从在线下载最新数据（解决盘中变化问题）==========
+    # ========== 交易时间：优先本地pkl，只补充当天缺失数据 ==========
     if _is_trading_time():
-        try:
-            df = _fetch_akshare(code, start_date, end_date, period, fq)
-            if not df.empty:
-                if auto_save:
-                    _save_to_pkl(code, df)
-                return df
-        except Exception:
-            pass
+        # 1. 先读本地pkl
+        df_local = _fetch_local_pkl(code, start_date, end_date)
+        if not df_local.empty:
+            last_date = df_local['date'].iloc[-1]
+            today_str = today.strftime('%Y-%m-%d')
+            
+            # 如果本地已包含今天数据，直接返回本地（避免盘中重复下载）
+            if last_date >= today_str:
+                print(f"[盘中本地] {code}: 本地已包含今天数据({last_date})，直接返回")
+                return df_local
+            
+            # 本地缺少今天数据，只下载最近10条补充（快速）
+            print(f"[盘中补充] {code}: 本地最新={last_date}，下载最近10条补充...")
+            try:
+                df_new = _fetch_findb(code, start_date, end_date, limit=10)
+                if not df_new.empty and df_new['date'].iloc[-1] > last_date:
+                    # 合并到本地并保存
+                    if auto_save:
+                        _save_to_pkl(code, df_new)
+                    # 重新读取本地（合并后）
+                    df_local = _fetch_local_pkl(code, start_date, end_date)
+                    return df_local
+                else:
+                    print(f"[盘中补充] {code}: 无新数据，返回本地")
+                    return df_local
+            except Exception as e:
+                print(f"[盘中补充失败] {code}: {e}，返回本地")
+                return df_local
         
-        try:
-            df = _fetch_westock(code, start_date, end_date, period, fq)
-            if not df.empty:
-                if auto_save:
-                    _save_to_pkl(code, df)
-                return df
-        except Exception:
-            pass
-        
-        try:
-            df = _fetch_findb(code, start_date, end_date, period, fq)
-            if not df.empty:
-                if auto_save:
-                    _save_to_pkl(code, df)
-                return df
-        except Exception:
-            pass
-        
-        return pd.DataFrame()
+        # 本地无数据，全量下载
+        print(f"[盘中全量] {code}: 本地无数据，全量下载...")
     
     # ========== 非交易时间：优先本地pkl，核对收盘价 ==========
     # 1. 尝试本地pkl
@@ -183,7 +186,7 @@ def fetch_kline(code: str, start_date: str, end_date: str,
             # 下载最近10天数据做对比（减少下载量）
             verify_start = (today - pd.Timedelta(days=10)).strftime('%Y-%m-%d')
             try:
-                df_verify = _fetch_akshare(code, verify_start, end_date, period, fq)
+                df_verify = _fetch_findb(code, verify_start, end_date, limit=10)
                 if not df_verify.empty:
                     # 找到本地和在线的最新共同交易日
                     local_last_date = df_local['date'].iloc[-1]
@@ -200,7 +203,7 @@ def fetch_kline(code: str, start_date: str, end_date: str,
                         else:
                             # 收盘价不一致，强制更新完整数据
                             print(f"[数据核对] {code}: close不一致 本地={local_close} 在线={verify_close}，强制更新")
-                            df_full = _fetch_akshare(code, start_date, end_date, period, fq)
+                            df_full = _fetch_findb(code, start_date, end_date)
                             if not df_full.empty:
                                 if auto_save:
                                     _save_to_pkl(code, df_full)
@@ -379,8 +382,13 @@ def _fetch_westock(code: str, start_date: str, end_date: str,
 
 # ========== findb API ==========
 def _fetch_findb(code: str, start_date: str, end_date: str,
-                 period: str = "day", fq: str = "qfq") -> pd.DataFrame:
-    """使用 findb API 获取数据"""
+                 period: str = "day", fq: str = "qfq", limit: int = None) -> pd.DataFrame:
+    """使用 findb API 获取数据
+    
+    Args:
+        limit: 自定义返回条数，None则根据日期范围自动计算
+               盘中补充时传小值（如10），快速获取最新数据
+    """
     import requests
     TOKEN = "sk_live_7orj6tBMMNiB.4eAcaTYc65icYsacCZksDfkHqvVvQyKfdbPf0X8aiR0"
     
@@ -388,11 +396,12 @@ def _fetch_findb(code: str, start_date: str, end_date: str,
     if not pure_code:
         return pd.DataFrame()
     
-    # 计算天数，根据日期范围动态计算limit（交易日约占自然日的70%，加50%缓冲）
-    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-    days = (end_dt - start_dt).days + 1
-    limit = max(int(days * 1.5), 100)  # 至少100条，避免太少
+    if limit is None:
+        # 计算天数，根据日期范围动态计算limit
+        start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+        days = (end_dt - start_dt).days + 1
+        limit = max(int(days * 1.5), 100)
     
     url = f"https://api.jiucaicat.icu:8443/api/bars?code={pure_code}.{suffix}&freq=daily&limit={limit}&order=desc"
     headers = {"Authorization": f"Bearer {TOKEN}"}
@@ -401,7 +410,6 @@ def _fetch_findb(code: str, start_date: str, end_date: str,
         resp = requests.get(url, headers=headers, timeout=60)
         data = resp.json()
         
-        # findb 返回格式: {"data": [{"datetime": "...", "open": ..., ...}]}
         records = data.get("data", []) if isinstance(data, dict) else data
         if not records or not isinstance(records, list):
             return pd.DataFrame()
@@ -409,24 +417,20 @@ def _fetch_findb(code: str, start_date: str, end_date: str,
         df = pd.DataFrame(records)
         df.columns = [c.lower() for c in df.columns]
         
-        # 重命名列
         df = df.rename(columns={
             'datetime': 'date',
             'time': 'date',
         })
         
-        # 确保标准列名
         for col in ['open', 'high', 'low', 'close', 'volume']:
             if col not in df.columns:
                 return pd.DataFrame()
         
-        # 处理日期
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         df = df[['date', 'open', 'high', 'low', 'close', 'volume']].sort_values('date').reset_index(drop=True)
         df['amount'] = df['volume'] * df['close']
         
-        # 按日期范围筛选
         df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
         return df
     except Exception as e:
