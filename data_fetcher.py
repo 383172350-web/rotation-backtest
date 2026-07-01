@@ -25,7 +25,7 @@ def _find_local_pkl_dir():
     for d in LOCAL_DATA_DIRS:
         if d and os.path.exists(d) and os.path.isdir(d):
             pkls = [f for f in os.listdir(d) if f.endswith("_1d.pkl")]
-            if len(pkls) > 3:
+            if len(pkls) > 0:  # 只要有pkl文件就返回
                 return d
     return None
 
@@ -46,6 +46,11 @@ def _ensure_save_dir():
 
 
 LOCAL_PKL_DIR = _find_local_pkl_dir()
+
+# 如果找不到本地pkl目录，使用回退目录（确保能保存）
+if LOCAL_PKL_DIR is None:
+    LOCAL_PKL_DIR = _ensure_save_dir()
+    print(f"[INFO] 使用回退pkl目录: {LOCAL_PKL_DIR}")
 
 
 def _save_to_pkl(code: str, df: pd.DataFrame, save_dir: str = None):
